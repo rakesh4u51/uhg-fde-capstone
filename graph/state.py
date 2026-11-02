@@ -13,6 +13,7 @@ class ClaimState(TypedDict, total=False):
     sla_result: str
 
     missing_documents: list[str]
+    document_complete: bool
     risks: list[str]
 
     current_stage: str

@@ -29,6 +29,45 @@ def document_node(state: ClaimState):
 
     claim = state["claim_data"]
 
+    document_text = claim.get(
+        "document_text",
+        ""
+    ).strip()
+
+    document_data = {
+        "document_type": claim.get(
+            "document_type",
+            "unknown",
+        ),
+        "text": document_text,
+        "confidence": claim.get(
+            "document_confidence",
+            0,
+        ),
+    }
+
+    result = run_document_agent(document_data)
+
+    if not document_text:
+        return {
+            "document_result": result,
+            "document_complete": False,
+            "missing_documents": [
+                "supporting_document"
+            ],
+            "current_stage": "documents_incomplete",
+        }
+
+    return {
+        "document_result": result,
+        "document_complete": True,
+        "missing_documents": [],
+        "current_stage": "documents_complete",
+    }
+    print("\n[2] Running Document Agent")
+
+    claim = state["claim_data"]
+
     document_data = {
         "document_type": claim.get(
             "document_type",
@@ -68,6 +107,29 @@ def summary_node(state: ClaimState):
         "current_stage": "summary_complete",
     }
 
+def route_after_documents(state: ClaimState):
+    if state.get("document_complete"):
+        return "summary"
+
+    return "await_documents"
+
+def route_after_documents(state: ClaimState):
+    if state.get("document_complete"):
+        return "summary"
+
+    return "await_documents"
+
+def await_documents_node(state: ClaimState):
+    print("\n[3] Missing Documents Detected")
+
+    return {
+        "current_stage": "awaiting_documents",
+        "status": "awaiting_documents",
+        "missing_documents": state.get(
+            "missing_documents",
+            [],
+        ),
+    }
 
 def routing_node(state: ClaimState):
     print("\n[4] Running Routing Agent")
@@ -166,11 +228,26 @@ builder.add_node("summary", summary_node)
 builder.add_node("routing", routing_node)
 builder.add_node("sla", sla_node)
 builder.add_node("human_review", human_review_node)
+builder.add_node(
+    "await_documents",
+    await_documents_node,
+)
 builder.add_node("finalize", finalize_node)
 
 builder.add_edge(START, "intake")
 builder.add_edge("intake", "documents")
-builder.add_edge("documents", "summary")
+builder.add_conditional_edges(
+    "documents",
+    route_after_documents,
+    {
+        "summary": "summary",
+        "await_documents": "await_documents",
+    },
+)
+builder.add_edge(
+    "await_documents",
+    END,
+)
 builder.add_edge("summary", "routing")
 builder.add_edge("routing", "sla")
 builder.add_edge("sla", "human_review")
