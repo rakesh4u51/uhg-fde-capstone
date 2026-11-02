@@ -10,6 +10,15 @@ from agents.summary_agent import run_summary_agent
 from agents.routing_agent import run_routing_agent
 from agents.sla_agent import run_sla_agent
 
+import asyncio
+
+from services.mcp_client import (
+    get_case,
+    check_coverage,
+    validate_documents,
+    request_human_approval,
+)
+
 
 def intake_node(state: ClaimState):
     print("\n[1] Running Intake Agent")
@@ -163,6 +172,23 @@ def sla_node(state: ClaimState):
         "status": "awaiting_human_review",
     }
 
+def approval_request_node(state: ClaimState):
+    print("\n[6] Requesting Human Approval via MCP")
+
+    async def request():
+        return await request_human_approval(
+            state["case_id"],
+            "Demo Approver",
+        )
+
+    result = asyncio.run(request())
+
+    return {
+        "approval_request": result,
+        "status": "awaiting_human_review",
+        "current_stage": "approval_requested",
+    }
+
 def human_review_node(state: ClaimState):
     print("\n[6] Waiting for Human Review")
 
@@ -220,7 +246,50 @@ def finalize_node(state: ClaimState):
         "status": "completed",
     }
 
+def mcp_validation_node(state: ClaimState):
+    print("\n[0] Running MCP Validation")
+
+    claim = state["claim_data"]
+
+    async def run_checks():
+        case_result = await get_case(
+            state["case_id"]
+        )
+
+        coverage_result = await check_coverage(
+            claim["policy_number"],
+            claim["claim_type"],
+            claim["claim_amount"],
+        )
+
+        document_result = await validate_documents(
+            state["case_id"]
+        )
+
+        return (
+            case_result,
+            coverage_result,
+            document_result,
+        )
+
+    (
+        case_result,
+        coverage_result,
+        document_result,
+    ) = asyncio.run(run_checks())
+
+    return {
+        "case_lookup": case_result,
+        "coverage_result": coverage_result,
+        "document_validation": document_result,
+        "current_stage": "mcp_validation_complete",
+    }
+
 builder = StateGraph(ClaimState)
+builder.add_node(
+    "mcp_validation",
+    mcp_validation_node,
+)
 
 builder.add_node("intake", intake_node)
 builder.add_node("documents", document_node)
@@ -232,9 +301,21 @@ builder.add_node(
     "await_documents",
     await_documents_node,
 )
+builder.add_node(
+    "approval_request",
+    approval_request_node,
+)
 builder.add_node("finalize", finalize_node)
 
-builder.add_edge(START, "intake")
+builder.add_edge(
+    START,
+    "mcp_validation",
+)
+
+builder.add_edge(
+    "mcp_validation",
+    "intake",
+)
 builder.add_edge("intake", "documents")
 builder.add_conditional_edges(
     "documents",
@@ -250,7 +331,15 @@ builder.add_edge(
 )
 builder.add_edge("summary", "routing")
 builder.add_edge("routing", "sla")
-builder.add_edge("sla", "human_review")
+builder.add_edge(
+    "sla",
+    "approval_request",
+)
+
+builder.add_edge(
+    "approval_request",
+    "human_review",
+)
 builder.add_edge("human_review", "finalize")
 builder.add_edge("finalize", END)
 

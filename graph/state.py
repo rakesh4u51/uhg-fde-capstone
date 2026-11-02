@@ -24,4 +24,9 @@ class ClaimState(TypedDict, total=False):
     human_reviewer: str
     final_result: str
 
+    case_lookup: dict[str, Any]
+    coverage_result: dict[str, Any]
+    document_validation: dict[str, Any]
+    approval_request: dict[str, Any]
+
     errors: list[str]
