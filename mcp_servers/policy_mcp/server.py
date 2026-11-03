@@ -133,6 +133,61 @@ def search_policy_wording(product: str) -> dict:
         ],
     }
 
+@mcp.resource("policy://{policy_number}")
+def policy_resource(policy_number: str) -> dict:
+    """Expose policy information as an MCP resource."""
+
+    policy = fetch_policy(policy_number)
+
+    if policy is None:
+        return {
+            "success": False,
+            "error": "Policy not found",
+        }
+
+    return {
+        "success": True,
+        "policy": dict(policy),
+    }
+
+@mcp.resource("policy-wording://{product}")
+def policy_wording_resource(product: str) -> dict:
+    """Expose policy information for a product."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    policy_number,
+                    product,
+                    status,
+                    coverage_limit,
+                    covered_claim_types
+                FROM public.policies
+                WHERE product ILIKE %s
+                ORDER BY policy_number
+                """,
+                (f"%{product}%",),
+            )
+
+            policies = cur.fetchall()
+
+    if not policies:
+        return {
+            "success": False,
+            "error": "Product not found",
+        }
+
+    return {
+        "success": True,
+        "product": product,
+        "policies": [
+            dict(policy)
+            for policy in policies
+        ],
+    }
 
 if __name__ == "__main__":
     mcp.run()

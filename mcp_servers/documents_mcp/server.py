@@ -1,5 +1,7 @@
 from fastmcp import FastMCP
 
+from services.database import get_connection
+
 mcp = FastMCP("Documents MCP")
 
 
@@ -112,6 +114,90 @@ def validate_case_documents(case_id: str) -> dict:
         "success": True,
         "complete": True,
         "missing_documents": [],
+    }
+
+@mcp.resource("document://{case_id}/{doc_id}")
+def document_resource(
+    case_id: str,
+    doc_id: str,
+) -> dict:
+    """Expose a claim document as an MCP resource."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    document_id,
+                    case_id,
+                    file_name,
+                    document_type,
+                    extracted_text,
+                    confidence,
+                    injection_detected,
+                    created_at
+                FROM public.documents
+                WHERE case_id = %s
+                  AND document_id = %s
+                """,
+                (
+                    case_id,
+                    doc_id,
+                ),
+            )
+
+            document = cur.fetchone()
+
+    if document is None:
+        return {
+            "success": False,
+            "error": "Document not found",
+        }
+
+    return {
+        "success": True,
+        "document": dict(document),
+    }
+
+@mcp.resource("document://{case_id}/{doc_id}")
+def document_resource(
+    case_id: str,
+    doc_id: str,
+) -> dict:
+    """Expose a claim document as an MCP resource."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    document_id,
+                    case_id,
+                    file_name,
+                    document_type,
+                    extracted_text,
+                    confidence,
+                    injection_detected,
+                    created_at
+                FROM public.documents
+                WHERE case_id = %s
+                  AND document_id = %s
+                """,
+                (case_id, doc_id),
+            )
+
+            document = cur.fetchone()
+
+    if document is None:
+        return {
+            "success": False,
+            "error": "Document not found",
+        }
+
+    return {
+        "success": True,
+        "document": dict(document),
     }
 
 
