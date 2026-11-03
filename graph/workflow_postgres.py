@@ -1,6 +1,8 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.types import interrupt
+from security.injection_guard import detect_prompt_injection
+from security.pii_guard import redact_pii
 
 from graph.state import ClaimState
 
@@ -37,65 +39,45 @@ def document_node(state: ClaimState):
     print("\n[2] Running Document Agent")
 
     claim = state["claim_data"]
-
-    document_text = claim.get(
-        "document_text",
-        ""
-    ).strip()
-
-    document_data = {
-        "document_type": claim.get(
-            "document_type",
-            "unknown",
-        ),
-        "text": document_text,
-        "confidence": claim.get(
-            "document_confidence",
-            0,
-        ),
-    }
-
-    result = run_document_agent(document_data)
+    document_text = claim.get("document_text", "").strip()
 
     if not document_text:
         return {
-            "document_result": result,
+            "document_result": "No supporting document provided.",
             "document_complete": False,
-            "missing_documents": [
-                "supporting_document"
-            ],
+            "missing_documents": ["supporting_document"],
             "current_stage": "documents_incomplete",
         }
+
+    injection_check = detect_prompt_injection(document_text)
+    if injection_check["detected"]:
+        return {
+            "document_result": (
+                "Suspicious instruction-like content detected. "
+                "Content was not sent to the model."
+            ),
+            "document_complete": False,
+            "missing_documents": [],
+            "risks": ["prompt_injection_detected"],
+            "current_stage": "security_review",
+            "status": "manual_review",
+        }
+
+    pii_result = redact_pii(document_text)
+    safe_document_text = pii_result["text"]
+
+    document_data = {
+        "document_type": claim.get("document_type", "unknown"),
+        "text": safe_document_text,
+        "confidence": claim.get("document_confidence", 0),
+    }
+
+    result = run_document_agent(document_data)
 
     return {
         "document_result": result,
         "document_complete": True,
         "missing_documents": [],
-        "current_stage": "documents_complete",
-    }
-    print("\n[2] Running Document Agent")
-
-    claim = state["claim_data"]
-
-    document_data = {
-        "document_type": claim.get(
-            "document_type",
-            "unknown",
-        ),
-        "text": claim.get(
-            "document_text",
-            "",
-        ),
-        "confidence": claim.get(
-            "document_confidence",
-            0,
-        ),
-    }
-
-    result = run_document_agent(document_data)
-
-    return {
-        "document_result": result,
         "current_stage": "documents_complete",
     }
 
@@ -122,11 +104,6 @@ def route_after_documents(state: ClaimState):
 
     return "await_documents"
 
-def route_after_documents(state: ClaimState):
-    if state.get("document_complete"):
-        return "summary"
-
-    return "await_documents"
 
 def await_documents_node(state: ClaimState):
     print("\n[3] Missing Documents Detected")
