@@ -1,0 +1,17 @@
+
+
+
+streamlit
+langchain
+langchain-core
+langchain-community
+langchain-ollama
+langgraph
+langgraph-checkpoint-postgres
+fastmcp
+mcp
+psycopg[binary]
+psycopg2-binary
+sqlalchemy
+python-dotenv
+pydantic
