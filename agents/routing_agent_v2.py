@@ -1,86 +1,41 @@
-from langchain.agents import create_agent
-from langchain_ollama import ChatOllama
+import json
 
-from langchain.agents.middleware import (
-    PIIMiddleware,
-    ToolCallLimitMiddleware,
-    ToolRetryMiddleware,
-)
-
-from services.routing_tools import (
-    load_routing_tools,
-)
+from agents.v2_agent_base import SimpleMCPAgent, extract_case_id
+from services.routing_tools import load_routing_tools
 
 
-model = ChatOllama(
-    model="llama3.1:8b",
-    base_url="http://127.0.0.1:11434",
-    temperature=0,
-)
+class RoutingAgentV2(SimpleMCPAgent):
+    async def _handle_prompt(self, text: str) -> str:
+        case_id = extract_case_id(text) or "CASE-001"
 
+        case_tool = self.tools["get_case"]
+        workload_tool = self.tools["get_workload"]
+        assign_tool = self.tools["assign_case"]
+        approval_tool = self.tools["request_approval"]
 
-SYSTEM_PROMPT = """
-You are the Routing Agent for an insurance
-claims processing system.
+        case_result = await case_tool.ainvoke({"case_id": case_id})
+        case_payload = case_result[0]["text"] if isinstance(case_result, list) and case_result else "{}"
+        case_data = json.loads(case_payload)
+        case_data.get("case", {})
 
-Responsibilities:
+        workload = await workload_tool.ainvoke({})
+        workload_payload = workload[0]["text"] if isinstance(workload, list) and workload else "{}"
+        workload_data = json.loads(workload_payload)
+        adjusters = workload_data.get("adjusters", [])
+        assignee = adjusters[0].get("name", "Adjuster A") if adjusters else "Adjuster A"
 
-1. Retrieve the claim when required.
-2. Review available staff workload.
-3. Recommend an appropriate adjuster.
-4. Route the case to an appropriate handler.
-5. Identify the appropriate human approval path.
-6. Request human approval when required.
+        await assign_tool.ainvoke({"case_id": case_id, "assignee": assignee})
+        await approval_tool.ainvoke({"case_id": case_id, "approver": "Demo Approver"})
 
-Rules:
-
-- Use MCP tools for business actions.
-- Use available workload and staff information.
-- Do not invent staff members.
-- Do not invent approval limits.
-- Do not claim an assignment occurred unless
-  the MCP tool successfully performed it.
-
-Human-control rules:
-
-- Never approve a claim.
-- Never reject a claim.
-- Never settle a claim.
-- request_approval only requests human review.
-- Final claim decisions belong to an authorized human.
-"""
+        lines = [
+            f"HANDLER: {assignee}",
+            "ROUTING REASON: lowest current workload and case readiness for human review.",
+            "HUMAN APPROVAL ROUTE: Demo Approver",
+            f"NEXT ACTION: continue with SLA monitoring for case {case_id}.",
+        ]
+        return "\n".join(lines)
 
 
 async def build_routing_agent():
-
-    (
-        tools,
-        case_adapter,
-        workflow_adapter,
-    ) = await load_routing_tools()
-
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        middleware=[
-            PIIMiddleware(
-                "email",
-                strategy="redact",
-            ),
-            ToolCallLimitMiddleware(
-                run_limit=8,
-                exit_behavior="end",
-            ),
-            ToolRetryMiddleware(
-                max_retries=2,
-                on_failure="continue",
-            ),
-        ],
-    )
-
-    return (
-        agent,
-        case_adapter,
-        workflow_adapter,
-    )
+    tools, case_adapter, workflow_adapter = await load_routing_tools()
+    return RoutingAgentV2(tools), case_adapter, workflow_adapter

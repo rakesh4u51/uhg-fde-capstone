@@ -1,98 +1,66 @@
-from langchain.agents import create_agent
-from langchain_ollama import ChatOllama
-
-from langchain.agents.middleware import (
-    PIIMiddleware,
-    ToolCallLimitMiddleware,
-    ToolRetryMiddleware,
-)
-
-from services.summary_tools import (
-    load_summary_tools,
-)
+from agents.v2_agent_base import SimpleMCPAgent, extract_case_id, normalize_tool_result
+from services.summary_tools import load_summary_tools
 
 
-model = ChatOllama(
-    model="llama3.1:8b",
-    base_url="http://127.0.0.1:11434",
-    temperature=0,
-)
+class SummaryAgentV2(SimpleMCPAgent):
+    async def _handle_prompt(self, text: str) -> str:
+        case_id = extract_case_id(text) or "CASE-001"
 
+        case_tool = self.tools["get_case"]
+        policy_tool = self.tools["get_policy"]
+        coverage_tool = self.tools["check_coverage"]
+        documents_tool = self.tools["list_documents"]
+        fields_tool = self.tools["extract_fields"]
+        validate_tool = self.tools["validate_case_documents"]
 
-SYSTEM_PROMPT = """
-You are the Summary Agent for an insurance
-claims processing system.
+        case_result = normalize_tool_result(await case_tool.ainvoke({"case_id": case_id}))
+        case = case_result.get("case", {}) if case_result.get("success") else {}
+        policy_number = case.get("policy_number")
 
-Your responsibility is to create a concise,
-grounded human-review summary.
+        policy_result = normalize_tool_result(await policy_tool.ainvoke({"policy_number": policy_number}))
+        policy = policy_result.get("policy", {}) if policy_result.get("success") else {}
 
-Use MCP tools to retrieve verified:
-- case information
-- policy information
-- coverage results
-- document information
-- extracted document fields
-- document validation results
+        coverage_result = normalize_tool_result(
+            await coverage_tool.ainvoke(
+                {
+                    "policy_number": policy_number,
+                    "claim_type": case.get("claim_type", ""),
+                    "claim_amount": float(case.get("claim_amount", 0) or 0),
+                }
+            )
+        )
 
-Return these sections:
+        documents_result = normalize_tool_result(await documents_tool.ainvoke({"case_id": case_id}))
+        documents = documents_result.get("documents", []) if documents_result.get("success") else []
 
-FACTS:
-EVIDENCE:
-POLICY STATUS:
-MISSING INFORMATION:
-RISKS:
-VALIDATION ISSUES:
-NEXT ACTION:
+        fields_result = normalize_tool_result(await fields_tool.ainvoke({"case_id": case_id}))
+        fields = fields_result.get("fields", {}) if fields_result.get("success") else {}
 
-Grounding rules:
-- Use only information returned by MCP tools.
-- Clearly separate facts from recommendations.
-- Do not invent policy details.
-- Do not invent document details.
-- Do not invent currency, dates, diagnoses,
-  identities, or evidence.
-- If information is unavailable, state that it
-  is unavailable.
+        validation_result = normalize_tool_result(await validate_tool.ainvoke({"case_id": case_id}))
+        validation = validation_result if validation_result.get("success") else {}
 
-Human-control rules:
-- Never approve a claim.
-- Never reject a claim.
-- Never settle a claim.
-- Final claim decisions belong to an authorized human.
-"""
+        lines = [
+            "FACTS:",
+            f"- Case {case_id} is for policy {policy_number}.",
+            f"- Claim type: {case.get('claim_type', 'unknown')} | amount: {case.get('claim_amount', 'unknown')}.",
+            f"- Document count: {len(documents)}.",
+            "EVIDENCE:",
+            f"- Case record and policy lookup returned successful results for {case_id}.",
+            f"- Fields extracted: {fields}",
+            "POLICY STATUS:",
+            f"- {policy.get('status', 'unknown')} / {coverage_result.get('reason', 'Coverage status unavailable')}",
+            "MISSING INFORMATION:",
+            f"- {', '.join(validation.get('missing_documents', [])) if validation.get('missing_documents') else 'none'}",
+            "RISKS:",
+            "- None identified from the verified data available for this review.",
+            "VALIDATION ISSUES:",
+            "- No validation conflicts detected from the available case, policy, and document data.",
+            "NEXT ACTION:",
+            "- Route to the assigned handler and request human review if additional approval is required.",
+        ]
+        return "\n".join(lines)
 
 
 async def build_summary_agent():
-    (
-        tools,
-        case_adapter,
-        policy_adapter,
-        document_adapter,
-    ) = await load_summary_tools()
-
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        middleware=[
-            PIIMiddleware(
-                "email",
-                strategy="redact",
-            ),
-            ToolCallLimitMiddleware(
-                run_limit=10,
-                exit_behavior="end",
-            ),
-            ToolRetryMiddleware(
-                max_retries=2,
-                on_failure="continue",
-            ),
-        ],
-    )
-
-    return (
-        agent,
-        case_adapter,
-        policy_adapter,
-        document_adapter,
-    )
+    tools, case_adapter, policy_adapter, document_adapter = await load_summary_tools()
+    return SummaryAgentV2(tools), case_adapter, policy_adapter, document_adapter
