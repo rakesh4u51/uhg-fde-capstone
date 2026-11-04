@@ -1,5 +1,5 @@
 from services.approver_validation import get_eligible_approvers, validate_approver_limit
-from services.notifications import build_mailpit_message, send_mailpit_email
+from services.notifications import build_mailpit_message, schedule_case_follow_up, send_mailpit_email
 import graph.workflow_v2 as workflow
 from langgraph.types import Command
 
@@ -73,3 +73,10 @@ def test_scenario_8_mailpit_payload_is_built_for_demo():
 def test_eligible_approvers_include_higher_limit_user():
     eligible = get_eligible_approvers(75000)
     assert "Senior Approver" in eligible or "Director Approver" in eligible
+
+
+def test_scheduler_follow_up_helper_creates_job():
+    scheduler = schedule_case_follow_up("CASE-999", delay_hours=1.0, callback=lambda case_id: None)
+    assert scheduler is not None
+    assert scheduler.get_jobs()
+    scheduler.shutdown(wait=False)

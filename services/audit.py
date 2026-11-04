@@ -1,39 +1,36 @@
-import os
 import json
-import psycopg
+import os
 
+import psycopg
 from dotenv import load_dotenv
 
 
 load_dotenv()
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def initialize_audit_table():
-    with psycopg.connect(
-        DATABASE_URL
-    ) as conn:
+    if not DATABASE_URL:
+        return None
 
+    with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS claim_audit (
+                CREATE TABLE IF NOT EXISTS public.claim_audit (
                     id BIGSERIAL PRIMARY KEY,
                     case_id TEXT NOT NULL,
                     actor TEXT NOT NULL,
                     action TEXT NOT NULL,
                     details JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ
-                        NOT NULL DEFAULT NOW()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
             )
-
         conn.commit()
+
+    return True
 
 
 def record_audit(
@@ -42,17 +39,17 @@ def record_audit(
     action: str,
     details: dict | None = None,
 ):
+    if not DATABASE_URL:
+        return {"id": None, "created_at": None}
+
+    initialize_audit_table()
     details = details or {}
 
-    with psycopg.connect(
-        DATABASE_URL
-    ) as conn:
-
+    with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-
             cur.execute(
                 """
-                INSERT INTO claim_audit
+                INSERT INTO public.claim_audit
                     (case_id, actor, action, details)
                 VALUES
                     (%s, %s, %s, %s::jsonb)
@@ -65,9 +62,7 @@ def record_audit(
                     json.dumps(details),
                 ),
             )
-
             record = cur.fetchone()
-
         conn.commit()
 
     return {

@@ -13,6 +13,12 @@ from services.mcp_client import (
     request_human_approval,
     validate_documents,
 )
+from services.notifications import (
+    notify_approval_request,
+    notify_missing_documents,
+    notify_sla_escalation,
+    schedule_case_follow_up,
+)
 from services.v2_agent_runner import (
     run_document_v2,
     run_intake_v2,
@@ -184,11 +190,19 @@ def summary_node(state: ClaimState):
 def await_documents_node(state: ClaimState):
     print("\n[Await Documents] Missing documents detected")
 
+    missing_documents = list(state.get("missing_documents") or [])
+    if missing_documents:
+        notify_missing_documents(
+            state["case_id"],
+            "claims-ops@uhg.local",
+            missing_documents,
+        )
+
     resume = interrupt(
         {
             "case_id": state["case_id"],
             "status": "awaiting_documents",
-            "missing_documents": state.get("missing_documents", []),
+            "missing_documents": missing_documents,
             "message": "Missing document data is required before continuing.",
         }
     )
@@ -248,6 +262,13 @@ def sla_node(state: ClaimState):
     print("\n[5] Running SLA Agent V2")
 
     result = asyncio.run(run_sla_v2(state["case_id"]))
+    notify_sla_escalation(state["case_id"], "claims-ops@uhg.local", delay_hours=24.0)
+    schedule_case_follow_up(
+        state["case_id"],
+        delay_hours=24.0,
+        callback=lambda case_id: notify_sla_escalation(case_id, "claims-ops@uhg.local", delay_hours=24.0),
+        job_name="sla",
+    )
 
     return {
         "sla_result": result,
@@ -265,6 +286,9 @@ def approval_request_node(state: ClaimState):
             "Demo Approver",
         )
     )
+    claim_data = state.get("claim_data") or {}
+    claim_amount = float(claim_data.get("claim_amount") or 0)
+    notify_approval_request(state["case_id"], "Demo Approver", claim_amount)
 
     return {
         "approval_request": result,

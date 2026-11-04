@@ -9,6 +9,7 @@ import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 from langgraph.types import Command
+from psycopg.rows import dict_row
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -16,10 +17,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from graph.v2_graph_factory import get_v2_graph
 from services.approver_validation import get_approver_directory, get_eligible_approvers, validate_approver_limit
+from services.audit import initialize_audit_table, record_audit
 from services.database import DATABASE_URL
 from services.document_processor import process_document, save_document_result
+from services.notifications import get_mailpit_messages
 
 load_dotenv()
+initialize_audit_table()
 
 st.set_page_config(
     page_title="Intelligent Claims Processing",
@@ -29,7 +33,7 @@ st.set_page_config(
 
 
 def _case_record(case_id: str) -> dict[str, Any] | None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -42,13 +46,8 @@ def _case_record(case_id: str) -> dict[str, Any] | None:
                     description,
                     status,
                     summary,
-                    current_stage,
                     created_at,
-                    updated_at,
-                    manual_review_reason,
-                    risks,
-                    security_flags,
-                    validation_issues
+                    updated_at
                 FROM public.claims
                 WHERE case_id = %s
                 """,
@@ -57,11 +56,11 @@ def _case_record(case_id: str) -> dict[str, Any] | None:
             row = cur.fetchone()
     if row is None:
         return None
-    return dict(row)
+    return row
 
 
 def _queue_cases() -> list[dict[str, Any]]:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -77,11 +76,11 @@ def _queue_cases() -> list[dict[str, Any]]:
                 """
             )
             rows = cur.fetchall()
-    return [dict(row) for row in rows]
+    return rows
 
 
 def _list_documents(case_id: str) -> list[dict[str, Any]]:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -100,11 +99,11 @@ def _list_documents(case_id: str) -> list[dict[str, Any]]:
                 (case_id,),
             )
             rows = cur.fetchall()
-    return [dict(row) for row in rows]
+    return rows
 
 
 def _insert_case(case_id: str, policy_number: str, claimant_name: str, claim_type: str, claim_amount: float, description: str) -> dict[str, Any]:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -130,7 +129,7 @@ def _insert_case(case_id: str, policy_number: str, claimant_name: str, claim_typ
             )
             row = cur.fetchone()
         conn.commit()
-    return dict(row)
+    return row
 
 
 def _persist_uploaded_documents(case_id: str, uploaded_files) -> list[dict[str, Any]]:
@@ -214,6 +213,7 @@ page = st.sidebar.radio(
         "Case Workspace",
         "Manual Review",
         "Human Review",
+        "Notifications",
         "Audit",
     ],
 )
@@ -250,6 +250,7 @@ if page == "Submit Claim":
                     "description": description,
                 }
                 result = _start_case_workflow(case_id, claim_data)
+                record_audit(case_id, "streamlit_ui", "claim_submitted", {"policy_number": policy_number, "claim_type": claim_type, "claim_amount": float(claim_amount)})
                 st.session_state.workflow_result = result
                 st.session_state.selected_case = case_id
                 st.success("Claim submitted and workflow started.")
@@ -290,7 +291,7 @@ elif page == "Case Workspace":
             with col2:
                 st.metric("Status", case.get("status"))
             with col3:
-                st.metric("Stage", case.get("current_stage") or "unknown")
+                st.metric("Stage", case.get("status") or "unknown")
 
             st.subheader("Claim Information")
             st.write({
@@ -319,11 +320,11 @@ elif page == "Case Workspace":
 
 elif page == "Manual Review":
     st.header("Manual Review")
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT case_id, claimant_name, claim_type, claim_amount, manual_review_reason, risks, security_flags, validation_issues, current_stage, status
+                SELECT case_id, claimant_name, claim_type, claim_amount, status, summary, description
                 FROM public.claims
                 WHERE status = 'manual_review'
                 ORDER BY updated_at DESC
@@ -335,17 +336,21 @@ elif page == "Manual Review":
         st.info("No manual-review cases currently waiting.")
     else:
         for row in rows:
-            case_id, claimant_name, claim_type, claim_amount, reason, risks, security_flags, validation_issues, current_stage, status = row
+            case_id = row.get("case_id")
+            claimant_name = row.get("claimant_name")
+            claim_type = row.get("claim_type")
+            claim_amount = row.get("claim_amount")
+            status = row.get("status")
+            summary = row.get("summary")
+            description = row.get("description")
             with st.expander(f"{case_id} - {claimant_name}"):
                 st.write({
                     "Claim Type": claim_type,
                     "Claim Amount": claim_amount,
-                    "Current Stage": current_stage,
+                    "Current Stage": status,
                     "Status": status,
-                    "Manual Review Reason": reason,
-                    "Risks": risks,
-                    "Security Flags": security_flags,
-                    "Validation Issues": validation_issues,
+                    "Description": description,
+                    "Summary": summary,
                 })
 
 elif page == "Human Review":
@@ -394,11 +399,28 @@ elif page == "Human Review":
                             "rationale": rationale,
                             "reviewer": reviewer,
                         })
+                        record_audit(chosen_case, reviewer, "human_decision_recorded", {"decision": decision, "rationale": rationale})
                         st.session_state.workflow_result = result
                         st.success("Human review submitted.")
                         st.write(result.get("final_result", ""))
                     except Exception as exc:
                         st.error(f"Unable to resume workflow: {exc}")
+
+elif page == "Notifications":
+    st.header("Mailpit Notifications")
+    messages = get_mailpit_messages()
+    if not messages:
+        st.info("No Mailpit messages are currently queued.")
+    else:
+        for message in messages[:20]:
+            with st.expander(f"{message.get('Subject', 'Message')} - {message.get('From', 'unknown')}"):
+                st.write({
+                    "To": message.get("To"),
+                    "From": message.get("From"),
+                    "Subject": message.get("Subject"),
+                    "Text": message.get("Text"),
+                    "Created": message.get("Created"),
+                })
 
 elif page == "Audit":
     st.header("Audit History")

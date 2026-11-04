@@ -45,14 +45,21 @@ flowchart LR
    MAILPIT_SMTP_PORT=1025
    MAILPIT_HTTP_PORT=8025
    ```
-3. Start Postgres and Mailpit:
+3. Start PostgreSQL and Mailpit:
    ```bash
    docker compose up -d
    ```
-4. Run the app:
+   This launches the app, Postgres, and Mailpit together for the demo environment.
+4. Run the app locally:
    ```bash
    streamlit run app/streamlit_app.py
    ```
+
+5. Or use the one-command demo launcher:
+   ```bash
+   ./start_demo.sh
+   ```
+   This starts PostgreSQL and Mailpit, then launches the Streamlit UI for the claims demo.
 
 ## Demo flow
 
@@ -68,6 +75,12 @@ Run the targeted supervisor and scenario suite:
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_v2_supervisor.py tests/test_scenario_suite.py -q
+```
+
+Run the evaluation gate for the core routing scenarios:
+
+```bash
+./.venv/bin/python evaluation/scenario_eval.py
 ```
 
 ## Related components
