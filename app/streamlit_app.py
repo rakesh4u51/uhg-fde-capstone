@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from graph.workflow_v2 import graph
+from services.approver_validation import get_eligible_approvers, validate_approver_limit
 
 import os
 import psycopg
@@ -200,14 +201,24 @@ elif page == "Human Review":
         st.subheader("Routing Recommendation")
         st.write(result.get("routing_result", "Not available"))
 
+        claim_amount = float((result.get("claim_data") or {}).get("claim_amount", 0) or 0)
+        available_approvers = get_eligible_approvers(claim_amount)
+        reviewer = st.selectbox("Reviewer", available_approvers or ["Demo Approver", "Senior Approver", "Director Approver"])
+        validation = validate_approver_limit(reviewer, claim_amount)
+
+        if validation["valid"]:
+            st.success(f"{reviewer} is authorized for {claim_amount:,.2f}.")
+        else:
+            st.error(f"{reviewer} cannot approve {claim_amount:,.2f}. Select a higher-limit approver.")
+
         decision = st.selectbox(
             "Decision",
             ["approved", "rejected", "request_more_information"],
         )
-        reviewer = st.text_input("Reviewer", value="Demo Approver")
         rationale = st.text_area("Decision Rationale")
 
-        if st.button("Submit Human Decision", type="primary"):
+        submit_disabled = not validation["valid"]
+        if st.button("Submit Human Decision", type="primary", disabled=submit_disabled):
             if not rationale.strip():
                 st.error("Please provide a rationale.")
             else:

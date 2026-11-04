@@ -5,14 +5,20 @@ services:
       dockerfile: Dockerfile
 
     container_name: claims-app
-
+    depends_on:
+      - mailpit
     ports:
       - "8501:8501"
-
     env_file:
       - .env
-
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: claims-mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
     restart: unless-stopped

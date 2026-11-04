@@ -1,13 +1,15 @@
 import asyncio
+import uuid
 
 from langgraph.types import Command
 
-from graph.workflow_v2 import graph
+from graph.v2_graph_factory import get_v2_graph
 
 
+THREAD_ID = f"CASE-001-V2-AIO-{uuid.uuid4().hex[:12]}"
 config = {
     "configurable": {
-        "thread_id": "CASE-001-V2"
+        "thread_id": THREAD_ID
     }
 }
 
@@ -44,70 +46,79 @@ async def main():
     print("STARTING CLAIM WORKFLOW")
     print("==============================")
 
-    result = await graph.ainvoke(
-        initial_state,
-        config=config,
-    )
+    async with get_v2_graph() as graph:
+        result = await graph.ainvoke(
+            initial_state,
+            config=config,
+        )
 
-    print("\n==============================")
-    print("WORKFLOW PAUSED FOR HUMAN")
-    print("==============================")
+        assert result.get("status") != "completed", "Case completed before human review"
+        assert result.get("human_decision") is None, "Human decision exists before review"
 
-    print("Case:", result.get("case_id"))
-    print("Status:", result.get("status"))
-    print("Stage:", result.get("current_stage"))
+        print("\n==============================")
+        print("WORKFLOW PAUSED FOR HUMAN")
+        print("==============================")
 
-    print("\n==============================")
-    print("SIMULATING HUMAN REVIEW")
-    print("==============================")
+        print("Case:", result.get("case_id"))
+        print("Status:", result.get("status"))
+        print("Stage:", result.get("current_stage"))
 
-    human_input = {
-        "decision": "approved",
-        "rationale": (
-            "Reviewed claim evidence and "
-            "supporting information."
-        ),
-        "reviewer": "Demo Approver",
-    }
+        print("\n==============================")
+        print("SIMULATING HUMAN REVIEW")
+        print("==============================")
 
-    result = await graph.ainvoke(
-        Command(resume=human_input),
-        config=config,
-    )
+        human_input = {
+            "decision": "approved",
+            "rationale": (
+                "Reviewed claim evidence and "
+                "supporting information."
+            ),
+            "reviewer": "Demo Approver",
+        }
 
-    print("\n==============================")
-    print("WORKFLOW RESUMED")
-    print("==============================")
+        result = await graph.ainvoke(
+            Command(resume=human_input),
+            config=config,
+        )
 
-    print("Case:", result.get("case_id"))
-    print(
-        "Human Decision:",
-        result.get("human_decision"),
-    )
-    print(
-        "Rationale:",
-        result.get("human_rationale"),
-    )
-    print(
-        "Reviewer:",
-        result.get("human_reviewer"),
-    )
-    print(
-        "Final Status:",
-        result.get("status"),
-    )
-    print(
-        "Final Stage:",
-        result.get("current_stage"),
-    )
-    print(
-        "Final Result:",
-        result.get("final_result"),
-    )
+        assert result.get("status") == "completed"
+        assert result.get("current_stage") == "finalized"
+        assert result.get("human_decision") == "approved"
+        assert result.get("human_reviewer") == "Demo Approver"
 
-    print("\n==============================")
-    print("HUMAN REVIEW TEST COMPLETE")
-    print("==============================")
+        print("\n==============================")
+        print("WORKFLOW RESUMED")
+        print("==============================")
+
+        print("Case:", result.get("case_id"))
+        print(
+            "Human Decision:",
+            result.get("human_decision"),
+        )
+        print(
+            "Rationale:",
+            result.get("human_rationale"),
+        )
+        print(
+            "Reviewer:",
+            result.get("human_reviewer"),
+        )
+        print(
+            "Final Status:",
+            result.get("status"),
+        )
+        print(
+            "Final Stage:",
+            result.get("current_stage"),
+        )
+        print(
+            "Final Result:",
+            result.get("final_result"),
+        )
+
+        print("\n==============================")
+        print("HUMAN REVIEW TEST COMPLETE")
+        print("===============================")
 
 
 if __name__ == "__main__":
