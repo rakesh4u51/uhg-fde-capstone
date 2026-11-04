@@ -30,3 +30,6 @@ class ClaimState(TypedDict, total=False):
     approval_request: dict[str, Any]
 
     errors: list[str]
+    failure_count: int
+    supervisor_result: dict[str, Any]
+    manual_review_result: dict[str, Any]

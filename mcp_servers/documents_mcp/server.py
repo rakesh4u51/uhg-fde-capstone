@@ -1,3 +1,5 @@
+import re
+
 from fastmcp import FastMCP
 
 from services.database import get_connection
@@ -21,13 +23,41 @@ DOCUMENTS = {
 }
 
 
+def _fetch_documents(case_id: str) -> list[dict]:
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        document_id,
+                        case_id,
+                        file_name AS name,
+                        document_type,
+                        extracted_text AS text,
+                        confidence,
+                        injection_detected,
+                        created_at
+                    FROM public.documents
+                    WHERE case_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (case_id,),
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+    except Exception:
+        return DOCUMENTS.get(case_id, [])
+
+
 @mcp.tool()
 def list_documents(case_id: str) -> dict:
     """List documents for a claim."""
 
+    documents = _fetch_documents(case_id)
     return {
         "success": True,
-        "documents": DOCUMENTS.get(case_id, []),
+        "documents": documents,
     }
 
 
@@ -35,16 +65,15 @@ def list_documents(case_id: str) -> dict:
 def extract_text(case_id: str) -> dict:
     """Return extracted document text."""
 
-    documents = DOCUMENTS.get(case_id, [])
-
+    documents = _fetch_documents(case_id)
     results = []
 
     for document in documents:
         results.append(
             {
                 "document_id": document["document_id"],
-                "text": document["text"],
-                "confidence": document["confidence"],
+                "text": document.get("text") or document.get("extracted_text") or "",
+                "confidence": document.get("confidence"),
             }
         )
 
@@ -58,7 +87,7 @@ def extract_text(case_id: str) -> dict:
 def classify_document(case_id: str) -> dict:
     """Return document classifications."""
 
-    documents = DOCUMENTS.get(case_id, [])
+    documents = _fetch_documents(case_id)
 
     classifications = []
 
@@ -66,7 +95,7 @@ def classify_document(case_id: str) -> dict:
         classifications.append(
             {
                 "document_id": document["document_id"],
-                "document_type": document["document_type"],
+                "document_type": document.get("document_type"),
             }
         )
 
@@ -80,18 +109,21 @@ def classify_document(case_id: str) -> dict:
 def extract_fields(case_id: str) -> dict:
     """Return important fields extracted from documents."""
 
-    if case_id == "CASE-001":
-        return {
-            "success": True,
-            "fields": {
-                "claimant_name": "Test Customer",
-                "amount": 25000,
-            },
-        }
+    documents = _fetch_documents(case_id)
+    fields: dict[str, object] = {}
+
+    if documents:
+        text = documents[0].get("text") or documents[0].get("extracted_text") or ""
+        claimant_match = re.search(r"(?:claimant(?:\s+name)?|patient|insured|policyholder)\s*[:\-]\s*([^\n]+)", text, re.IGNORECASE)
+        amount_match = re.search(r"\$\s?\d[\d,]*(?:\.\d{2})?", text, re.IGNORECASE)
+        if claimant_match:
+            fields["claimant_name"] = claimant_match.group(1).strip()
+        if amount_match:
+            fields["amount"] = float(amount_match.group(0).replace(",", "").replace("$", ""))
 
     return {
         "success": True,
-        "fields": {},
+        "fields": fields,
     }
 
 
@@ -99,7 +131,7 @@ def extract_fields(case_id: str) -> dict:
 def validate_case_documents(case_id: str) -> dict:
     """Check whether required claim documents are present."""
 
-    documents = DOCUMENTS.get(case_id, [])
+    documents = _fetch_documents(case_id)
 
     if not documents:
         return {
@@ -110,54 +142,13 @@ def validate_case_documents(case_id: str) -> dict:
             ],
         }
 
+    has_injection = any(bool(doc.get("injection_detected")) for doc in documents)
+
     return {
         "success": True,
         "complete": True,
         "missing_documents": [],
-    }
-
-@mcp.resource("document://{case_id}/{doc_id}")
-def document_resource(
-    case_id: str,
-    doc_id: str,
-) -> dict:
-    """Expose a claim document as an MCP resource."""
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                SELECT
-                    document_id,
-                    case_id,
-                    file_name,
-                    document_type,
-                    extracted_text,
-                    confidence,
-                    injection_detected,
-                    created_at
-                FROM public.documents
-                WHERE case_id = %s
-                  AND document_id = %s
-                """,
-                (
-                    case_id,
-                    doc_id,
-                ),
-            )
-
-            document = cur.fetchone()
-
-    if document is None:
-        return {
-            "success": False,
-            "error": "Document not found",
-        }
-
-    return {
-        "success": True,
-        "document": dict(document),
+        "risks": ["prompt_injection_detected"] if has_injection else [],
     }
 
 @mcp.resource("document://{case_id}/{doc_id}")

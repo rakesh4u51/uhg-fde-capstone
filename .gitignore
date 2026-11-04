@@ -1,3 +1,13 @@
 .env
+.venv/
+.pytest_cache/
+.benchmarks/
+.deepeval/
+.claude/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.log
+uploads/
+medical_bill.md

@@ -11,11 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-from graph.workflow_postgres import graph
-import streamlit as st
-from langgraph.types import Command
-
-from graph.workflow_postgres import graph
+from graph.workflow_v2 import graph
 
 import os
 import psycopg
