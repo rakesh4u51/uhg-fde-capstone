@@ -12,6 +12,34 @@ DEFAULT_APPROVERS = [
 ]
 
 
+def _normalize_approver_directory(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not rows:
+        return [dict(approver) for approver in DEFAULT_APPROVERS]
+
+    normalized = []
+    for row in rows:
+        if not row.get("name"):
+            continue
+        normalized.append(
+            {
+                "name": row.get("name"),
+                "role": row.get("role", "adjuster"),
+                "approval_limit": float(row.get("approval_limit", 0) or 0),
+                "active": bool(row.get("active", True)),
+            }
+        )
+
+    if not normalized:
+        return [dict(approver) for approver in DEFAULT_APPROVERS]
+
+    required_names = {str(approver["name"]).lower() for approver in DEFAULT_APPROVERS}
+    actual_names = {str(approver["name"]).lower() for approver in normalized}
+    if not required_names.issubset(actual_names):
+        return [dict(approver) for approver in DEFAULT_APPROVERS]
+
+    return normalized
+
+
 def get_approver_directory() -> list[dict[str, Any]]:
     """Return approvers from the staff table when available, otherwise return local defaults."""
     try:
@@ -32,8 +60,7 @@ def get_approver_directory() -> list[dict[str, Any]]:
                     """
                 )
                 rows = cur.fetchall()
-        if rows:
-            return [dict(row) for row in rows]
+        return _normalize_approver_directory(rows)
     except Exception:
         pass
 
@@ -45,7 +72,6 @@ def validate_approver_limit(approver_name: str, claim_amount: float | int, staff
     directory = staff_directory or get_approver_directory()
     approver = next((item for item in directory if str(item.get("name", "")).lower() == str(approver_name).lower()), None)
     if approver is None:
-        # If the approver isn't in the directory, allow a modest default to avoid blocking demo flows.
         default_limit = 50000
         valid = float(claim_amount) <= default_limit
         return {
@@ -53,7 +79,8 @@ def validate_approver_limit(approver_name: str, claim_amount: float | int, staff
             "approval_limit": default_limit,
             "claim_amount": float(claim_amount),
             "valid": valid,
-            "reason": "Fallback approver policy applied." if valid else "Approver is not assigned a high enough limit for this claim amount.",
+            "source": "demo fallback configuration",
+            "reason": "demo fallback configuration applied." if valid else "demo fallback configuration rejected this claim amount.",
         }
 
     limit = float(approver.get("approval_limit", 0) or 0)
@@ -64,6 +91,7 @@ def validate_approver_limit(approver_name: str, claim_amount: float | int, staff
         "approval_limit": limit,
         "claim_amount": claim_value,
         "valid": valid,
+        "source": "public.staff",
         "reason": "Approved within approver limit." if valid else "Claim amount exceeds approver approval limit.",
     }
 
