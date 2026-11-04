@@ -31,6 +31,176 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown(
+    """
+    <style>
+        * {
+            font-family: "Segoe UI", "Inter", sans-serif;
+        }
+
+        .stApp {
+            background: linear-gradient(135deg, #f8fafc 0%, #edf6ff 38%, #f3f4f6 100%);
+            color: #0f172a;
+        }
+
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+            max-width: 1460px;
+        }
+
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0b1220 0%, #101827 100%);
+            color: #ffffff;
+            border-right: 1px solid rgba(148, 163, 184, 0.22);
+        }
+
+        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] .stRadio,
+        [data-testid="stSidebar"] .stSelectbox,
+        [data-testid="stSidebar"] .stTextInput,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] div,
+        [data-testid="stSidebar"] span {
+            color: #ffffff !important;
+            opacity: 1;
+        }
+
+        .stRadio > div {
+            gap: 0.6rem;
+        }
+
+        [role="radiogroup"] > label {
+            background: rgba(255, 255, 255, 0.04) !important;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            padding: 0.82rem 0.9rem;
+            margin: 0.2rem 0;
+            transition: all 0.2s ease;
+            color: #ffffff !important;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            opacity: 1;
+            box-shadow: none;
+        }
+
+        [role="radiogroup"] > label > div,
+        [role="radiogroup"] > label > span,
+        [role="radiogroup"] > label p,
+        [role="radiogroup"] > label div {
+            color: #ffffff !important;
+            font-weight: 700;
+            opacity: 1;
+        }
+
+        [role="radiogroup"] > label:hover {
+            background: rgba(255, 255, 255, 0.07) !important;
+            border-color: rgba(255, 255, 255, 0.25);
+        }
+
+        [role="radiogroup"] > label[data-checked="true"] {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border-color: rgba(255, 255, 255, 0.82);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+        }
+
+        [role="radiogroup"] input[type="radio"] {
+            accent-color: #f8fafc;
+            transform: scale(1.08);
+        }
+
+        h1, h2, h3, h4 {
+            color: #0f172a;
+            letter-spacing: -0.03em;
+        }
+
+        .stMetric {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.15);
+            border-radius: 16px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+            padding: 0.75rem 1rem;
+        }
+
+        [data-testid="stMetricValue"] {
+            color: #0f172a;
+            font-size: 1.8rem;
+            font-weight: 700;
+        }
+
+        .stDataFrame {
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+        }
+
+        div[data-testid="stExpander"] > div {
+            background: rgba(255, 255, 255, 0.7);
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+        }
+
+        .stButton > button {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            padding: 0.65rem 1.05rem;
+            font-weight: 600;
+            box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22);
+        }
+
+        .stButton > button:hover {
+            filter: brightness(1.04);
+            box-shadow: 0 12px 24px rgba(37, 99, 235, 0.28);
+        }
+
+        .stAlert {
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            background: rgba(255, 255, 255, 0.72);
+        }
+
+        .stForm {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            border-radius: 18px;
+            padding: 1rem 1.05rem;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.04);
+        }
+
+        .stTextInput input, .stSelectbox select, .stNumberInput input, .stTextArea textarea {
+            border-radius: 10px !important;
+            border: 1px solid rgba(148, 163, 184, 0.3) !important;
+            background: rgba(255, 255, 255, 0.82) !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+page = st.sidebar.radio(
+    "Navigation",
+    [
+        "Submit Claim",
+        "Case Queue",
+        "Case Workspace",
+        "Manual Review Queue",
+        "Human Review Queue",
+        "Notifications",
+        "Audit",
+    ],
+    key="sidebar_navigation",
+)
+
+if page == "Manual Review Queue":
+    page = "Manual Review"
+elif page == "Human Review Queue":
+    page = "Human Review"
+
 
 def _case_record(case_id: str) -> dict[str, Any] | None:
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
@@ -89,6 +259,7 @@ def _list_documents(case_id: str) -> list[dict[str, Any]]:
                     case_id,
                     file_name,
                     document_type,
+                    extracted_text,
                     confidence,
                     injection_detected,
                     created_at
@@ -146,15 +317,52 @@ def _persist_uploaded_documents(case_id: str, uploaded_files) -> list[dict[str, 
         processed = process_document(str(destination))
         document_id = f"DOC-{uuid.uuid4().hex[:8].upper()}"
         payload = save_document_result(case_id, str(destination), document_id=document_id, result=processed)
+        print("[UI] Document persisted:", payload.get("document_id"))
         saved.append(payload)
 
     return saved
 
 
+def _hydrate_claim_data(case_id: str, claim_data: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(claim_data or {})
+    payload["case_id"] = case_id
+    payload.setdefault("document_text", "")
+    payload.setdefault("document_type", "unknown")
+    payload.setdefault("document_confidence", 0.0)
+    payload.setdefault("document_ids", [])
+
+    documents = _list_documents(case_id)
+    if documents:
+        payload["document_ids"] = [row.get("document_id") for row in documents if row.get("document_id")]
+        texts = []
+        confidence_values: list[float] = []
+        for row in documents:
+            value = row.get("extracted_text") or row.get("text") or ""
+            if value:
+                texts.append(str(value).strip())
+            if row.get("confidence") is not None:
+                try:
+                    confidence_values.append(float(row["confidence"]))
+                except (TypeError, ValueError):
+                    pass
+            if payload.get("document_type") in {None, "", "unknown"}:
+                doc_type = row.get("document_type")
+                if doc_type:
+                    payload["document_type"] = doc_type
+        payload["document_text"] = "\n\n".join(text for text in texts if text)
+        payload["document_confidence"] = max(confidence_values) if confidence_values else 0.0
+
+    return payload
+
+
+def _new_thread_id(case_id: str) -> str:
+    return f"{case_id}-{uuid.uuid4().hex[:12]}"
+
+
 def _get_thread_id(case_id: str) -> str:
     thread_map = st.session_state.setdefault("workflow_threads", {})
     if case_id not in thread_map:
-        thread_map[case_id] = f"{case_id}-{uuid.uuid4().hex[:10]}"
+        thread_map[case_id] = _new_thread_id(case_id)
     return thread_map[case_id]
 
 
@@ -170,8 +378,9 @@ def _resume_human_review(case_id: str, human_input: dict[str, str]) -> dict[str,
     return asyncio.run(_run())
 
 
-def _start_case_workflow(case_id: str, claim_data: dict[str, Any]) -> dict[str, Any]:
-    thread_id = _get_thread_id(case_id)
+def _start_case_workflow(case_id: str, claim_data: dict[str, Any], thread_id: str | None = None) -> dict[str, Any]:
+    thread_id = thread_id or _get_thread_id(case_id)
+    st.session_state.setdefault("workflow_threads", {})[case_id] = thread_id
     initial_state = {
         "case_id": case_id,
         "claim_data": claim_data,
@@ -201,22 +410,30 @@ if "workflow_result" not in st.session_state:
 if "selected_case" not in st.session_state:
     st.session_state.selected_case = None
 
-st.title("Intelligent Claims Processing")
-st.caption("AI-assisted claims processing with human-in-the-loop controls")
-st.divider()
-
-page = st.sidebar.radio(
-    "Navigation",
-    [
-        "Submit Claim",
-        "Case Queue",
-        "Case Workspace",
-        "Manual Review",
-        "Human Review",
-        "Notifications",
-        "Audit",
-    ],
+st.markdown(
+    """
+    <div style="
+        background: linear-gradient(135deg, rgba(37,99,235,0.12), rgba(14,165,233,0.06));
+        border: 1px solid rgba(37,99,235,0.14);
+        border-radius: 20px;
+        padding: 1.3rem 1.5rem;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 14px 30px rgba(37,99,235,0.08);
+    ">
+        <div style="font-size: 0.82rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #2563eb; margin-bottom: 0.45rem;">
+            Claims Operations Console
+        </div>
+        <div style="font-size: 2.25rem; font-weight: 800; color: #0f172a; line-height: 1.1;">
+            Intelligent Claims Processing
+        </div>
+        <div style="margin-top: 0.45rem; color: #475569; font-size: 1rem;">
+            AI-assisted claims processing with human-in-the-loop controls
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
+st.divider()
 
 if page == "Submit Claim":
     st.header("Submit Claim")
@@ -240,7 +457,8 @@ if page == "Submit Claim":
         else:
             try:
                 _insert_case(case_id, policy_number, claimant_name, claim_type, float(claim_amount), description)
-                _persist_uploaded_documents(case_id, uploaded_files)
+                print("[UI] Claim registered:", case_id)
+                saved_documents = _persist_uploaded_documents(case_id, uploaded_files)
                 claim_data = {
                     "case_id": case_id,
                     "policy_number": policy_number,
@@ -249,7 +467,11 @@ if page == "Submit Claim":
                     "claim_amount": float(claim_amount),
                     "description": description,
                 }
-                result = _start_case_workflow(case_id, claim_data)
+                claim_data = _hydrate_claim_data(case_id, claim_data)
+                thread_id = _new_thread_id(case_id)
+                st.session_state.setdefault("workflow_threads", {})[case_id] = thread_id
+                print("[UI] Starting LangGraph:", thread_id)
+                result = _start_case_workflow(case_id, claim_data, thread_id=thread_id)
                 record_audit(case_id, "streamlit_ui", "claim_submitted", {"policy_number": policy_number, "claim_type": claim_type, "claim_amount": float(claim_amount)})
                 st.session_state.workflow_result = result
                 st.session_state.selected_case = case_id
@@ -270,7 +492,7 @@ elif page == "Case Queue":
             "Amount": row.get("claim_amount"),
             "Status": row.get("status"),
         } for row in cases]
-        st.dataframe(queue_df, use_container_width=True)
+        st.dataframe(queue_df, width="stretch")
 
 elif page == "Case Workspace":
     st.header("Case Workspace")

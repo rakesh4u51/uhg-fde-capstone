@@ -1,4 +1,4 @@
-from langchain.mcp import MCPAdapter
+from services.mcp_compat import MCPAdapter
 
 from mcp_servers.case_mcp.server import (
     mcp as case_mcp,

@@ -20,6 +20,12 @@ sudo docker compose ps mailpit
 echo "Checking PostgreSQL..."
 pg_isready -h localhost -p 5432
 
+if ss -lnt | grep -q ':8501 '; then
+  echo "Port 8501 is already in use by a previous Streamlit session. Cleaning it up..."
+  pkill -f "streamlit run app/streamlit_app.py" || true
+  pkill -f "uvicorn.*8501" || true
+fi
+
 echo "Launching Streamlit demo UI..."
 PYTHONPATH=. streamlit run app/streamlit_app.py \
   --server.address=0.0.0.0 \

@@ -114,6 +114,42 @@ class DocumentProcessorTests(unittest.TestCase):
             self.assertEqual(row["case_id"], "CASE-001")
             self.assertTrue(row["injection_detected"] in (False, None))
 
+    def test_save_document_result_is_idempotent_for_same_document_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claim_file = Path(temp_dir) / "medical_bill.pdf"
+            claim_file.write_text(
+                "Claimant Name: Jane Smith\n"
+                "Policy Number: POL-2002\n"
+                "Amount: $4,200\n"
+                "Service Date: 2025-07-01\n",
+                encoding="utf-8",
+            )
+
+            document_id = f"DOC-IDEMPOTENT-{uuid.uuid4().hex[:8].upper()}"
+            first = save_document_result(
+                case_id="CASE-001",
+                file_path=str(claim_file),
+                document_id=document_id,
+            )
+            second = save_document_result(
+                case_id="CASE-001",
+                file_path=str(claim_file),
+                document_id=document_id,
+            )
+
+            self.assertEqual(first["document_id"], document_id)
+            self.assertEqual(second["document_id"], document_id)
+
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) AS row_count FROM public.documents WHERE document_id = %s",
+                        (document_id,),
+                    )
+                    row = cur.fetchone()
+
+            self.assertEqual(row["row_count"], 1)
+
     def test_validate_document_case_blocks_unsafe_documents(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             claim_file = Path(temp_dir) / "medical_bill.pdf"

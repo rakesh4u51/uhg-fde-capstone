@@ -7,6 +7,7 @@ from langgraph.types import Command, Send, interrupt
 
 from graph.state import ClaimState
 from mcp_servers.workflow_mcp.server import mcp as workflow_mcp
+from services.database import DATABASE_URL, get_connection
 from services.mcp_client import (
     check_coverage,
     get_case,
@@ -60,6 +61,23 @@ def _normalise_document_data(state: ClaimState) -> dict[str, Any]:
     if "document_type" not in data:
         data["document_type"] = "unknown"
     return data
+
+
+def _persist_case_status(case_id: str, status: str, current_stage: str | None = None) -> None:
+    if not case_id:
+        return
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.claims
+                SET status = %s,
+                    updated_at = NOW()
+                WHERE case_id = %s
+                """,
+                (status, case_id),
+            )
+        conn.commit()
 
 
 def _transition_guard(state: ClaimState) -> tuple[str, str]:
@@ -269,6 +287,7 @@ def sla_node(state: ClaimState):
         callback=lambda case_id: notify_sla_escalation(case_id, "claims-ops@uhg.local", delay_hours=24.0),
         job_name="sla",
     )
+    _persist_case_status(state["case_id"], "awaiting_human_review", "sla_complete")
 
     return {
         "sla_result": result,
@@ -289,6 +308,7 @@ def approval_request_node(state: ClaimState):
     claim_data = state.get("claim_data") or {}
     claim_amount = float(claim_data.get("claim_amount") or 0)
     notify_approval_request(state["case_id"], "Demo Approver", claim_amount)
+    _persist_case_status(state["case_id"], "awaiting_human_review", "approval_requested")
 
     return {
         "approval_request": result,
@@ -309,6 +329,7 @@ def human_review_node(state: ClaimState):
             "message": "Human decision required",
         }
     )
+    _persist_case_status(state["case_id"], "human_decision_received", "human_review_complete")
 
     return {
         "human_decision": human_response.get("decision", "unknown"),
@@ -371,6 +392,11 @@ def supervisor_node(state: ClaimState):
     reason = ""
     status = state.get("status") or ""
     current_stage = state.get("current_stage") or "submitted"
+    validation = state.get("document_validation") or {}
+    missing_documents = list(state.get("missing_documents") or [])
+    validation_missing = list((validation.get("missing_documents") or []) or [])
+    missing_documents.extend(validation_missing)
+    missing_documents = list(dict.fromkeys(missing_documents))
 
     if state.get("human_decision"):
         reason = "Human decision received; finalization is required."
@@ -406,17 +432,6 @@ def supervisor_node(state: ClaimState):
             },
         )
 
-    if state.get("missing_documents"):
-        reason = "Missing required documents detected."
-        return Command(
-            goto="await_documents",
-            update={
-                "next_step": "await_documents",
-                "status": "awaiting_documents",
-                "supervisor_reason": reason,
-            },
-        )
-
     if state.get("document_complete") is False:
         reason = "Document processing is incomplete."
         return Command(
@@ -428,7 +443,6 @@ def supervisor_node(state: ClaimState):
             },
         )
 
-    validation = state.get("document_validation") or {}
     if validation.get("continue_allowed") is False:
         reason = "Document validation blocked continuation."
         return Command(
@@ -458,6 +472,17 @@ def supervisor_node(state: ClaimState):
             update={
                 "next_step": "manual_review",
                 "status": "manual_review",
+                "supervisor_reason": reason,
+            },
+        )
+
+    if missing_documents:
+        reason = "Missing required documents detected."
+        return Command(
+            goto="await_documents",
+            update={
+                "next_step": "await_documents",
+                "status": "awaiting_documents",
                 "supervisor_reason": reason,
             },
         )

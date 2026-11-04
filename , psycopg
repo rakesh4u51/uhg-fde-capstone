@@ -1,0 +1,14 @@
+                             Table "public.policies"
+       Column        |           Type           | Collation | Nullable | Default 
+---------------------+--------------------------+-----------+----------+---------
+ policy_number       | character varying(50)    |           | not null | 
+ product             | character varying(100)   |           | not null | 
+ status              | character varying(30)    |           | not null | 
+ coverage_limit      | numeric(12,2)            |           | not null | 
+ covered_claim_types | text[]                   |           | not null | 
+ created_at          | timestamp with time zone |           |          | now()
+Indexes:
+    "policies_pkey" PRIMARY KEY, btree (policy_number)
+Referenced by:
+    TABLE "claims" CONSTRAINT "fk_claim_policy" FOREIGN KEY (policy_number) REFERENCES policies(policy_number)
+

@@ -248,6 +248,14 @@ def save_document_result(
                     confidence,
                     injection_detected
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (document_id) DO UPDATE SET
+                    case_id = EXCLUDED.case_id,
+                    file_name = EXCLUDED.file_name,
+                    document_type = EXCLUDED.document_type,
+                    extracted_text = EXCLUDED.extracted_text,
+                    confidence = EXCLUDED.confidence,
+                    injection_detected = EXCLUDED.injection_detected
+                RETURNING document_id, case_id, file_name, document_type, extracted_text, confidence, injection_detected
                 """,
                 (
                     payload["document_id"],
@@ -259,6 +267,9 @@ def save_document_result(
                     payload["injection_detected"],
                 ),
             )
+            row = cur.fetchone()
+            if row is not None:
+                payload.update(dict(row))
             conn.commit()
 
     return payload
