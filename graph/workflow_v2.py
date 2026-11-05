@@ -52,6 +52,19 @@ def _request_missing_documents(case_id: str, missing_documents: list[str]) -> di
     return result
 
 
+def _required_documents_for_claim_type(claim_type: str | None) -> list[str]:
+    value = (claim_type or "").strip().lower()
+    normalized = "".join(value.split())
+
+    if any(token in normalized for token in ("medical", "health", "hospital", "injury")):
+        return ["medical_bill"]
+    if any(token in normalized for token in ("vehicle", "car", "auto", "motor")):
+        return ["accident_report", "repair_estimate"]
+    if any(token in normalized for token in ("property", "home", "dwelling", "fire")):
+        return ["property_damage_photos", "repair_invoice"]
+    return ["supporting_document"]
+
+
 def _normalise_document_data(state: ClaimState) -> dict[str, Any]:
     data = dict(state.get("claim_data") or {})
     if "document_text" not in data:
@@ -159,10 +172,11 @@ def document_node(state: ClaimState):
         )
 
     if not document_text:
+        missing_documents = _required_documents_for_claim_type(claim_data.get("claim_type"))
         return {
             "document_result": "No supporting document text was provided.",
             "document_complete": False,
-            "missing_documents": ["supporting_document"],
+            "missing_documents": missing_documents,
             "current_stage": "documents_incomplete",
             "status": "awaiting_documents",
         }

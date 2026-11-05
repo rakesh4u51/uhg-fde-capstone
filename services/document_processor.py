@@ -198,6 +198,57 @@ def _choose_missing_fields(values: dict[str, Any]) -> list[str]:
     return missing
 
 
+def _cap_confidence_for_case_match(case_id: str, result: DocumentProcessingResult) -> DocumentProcessingResult:
+    """Reduce confidence sharply when extracted document fields do not align with the claim record."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT claimant_name, claim_amount
+                FROM public.claims
+                WHERE case_id = %s
+                """,
+                (case_id,),
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        return result
+
+    extracted_text = getattr(result, "extracted_text", "") or ""
+    document_claimant = (getattr(result, "claimant_name", None) or _extract_claimant_name(extracted_text) or "").strip()
+    stored_claimant = (row["claimant_name"] or "").strip()
+    document_amount = getattr(result, "amount", None)
+    if document_amount is None:
+        document_amount = _extract_amount(extracted_text)
+    stored_amount = row["claim_amount"]
+    document_date = getattr(result, "service_date", None) or _extract_service_date(extracted_text)
+
+    mismatch_count = 0
+
+    if document_claimant and stored_claimant and document_claimant.lower() != stored_claimant.lower():
+        mismatch_count += 1
+
+    if document_amount is not None and stored_amount is not None and abs(float(document_amount) - float(stored_amount)) > 0.01:
+        mismatch_count += 1
+
+    if document_date and mismatch_count:
+        mismatch_count += 1
+
+    if mismatch_count >= 1:
+        result.confidence = min(float(result.confidence), 0.30)
+    if mismatch_count >= 2:
+        result.confidence = min(float(result.confidence), 0.20)
+    if mismatch_count >= 3:
+        result.confidence = min(float(result.confidence), 0.10)
+
+    if getattr(result, "injection_detected", False):
+        result.confidence = min(float(result.confidence), 0.10)
+
+    return result
+
+
 def save_document_result(
     case_id: str,
     file_path: str,
@@ -220,6 +271,8 @@ def save_document_result(
 
     if result is None:
         result = process_document(file_path)
+
+    result = _cap_confidence_for_case_match(case_id, result)
 
     if document_id is None:
         document_id = f"DOC-{uuid.uuid4().hex[:8].upper()}"
@@ -365,6 +418,19 @@ def process_document(file_path: str) -> DocumentProcessingResult:
     return result
 
 
+def _required_documents_for_claim_type(claim_type: str | None) -> list[str]:
+    value = (claim_type or "").strip().lower()
+    normalized = "".join(value.split())
+
+    if any(token in normalized for token in ("medical", "health", "hospital", "injury")):
+        return ["medical_bill"]
+    if any(token in normalized for token in ("vehicle", "car", "auto", "motor")):
+        return ["accident_report", "repair_estimate"]
+    if any(token in normalized for token in ("property", "home", "dwelling", "fire")):
+        return ["property_damage_photos", "repair_invoice"]
+    return ["supporting_document"]
+
+
 def validate_document_case(
     case_id: str,
     document_result: DocumentProcessingResult | None = None,
@@ -433,8 +499,8 @@ def validate_document_case(
     missing_documents: list[str] = []
 
     if not documents:
-        missing_documents.append("supporting_document")
-        issues.append("Missing required supporting document.")
+        missing_documents.extend(_required_documents_for_claim_type(claim["claim_type"]))
+        issues.append("Missing required supporting document(s) for the claim type.")
 
     if document_result.injection_detected or any("prompt injection" in item.lower() for item in document_result.validation_issues):
         issues.append("Prompt injection detected; safe handling required before workflow continuation.")
@@ -481,7 +547,7 @@ def validate_document_case(
         "continue_allowed": continue_allowed,
         "issues": issues,
         "risks": risks,
-        "missing_documents": missing_documents,
+        "missing_documents": list(dict.fromkeys(missing_documents)),
         "claim": dict(claim),
         "policy": dict(policy) if policy else None,
         "document_count": len(documents),

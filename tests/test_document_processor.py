@@ -169,6 +169,24 @@ class DocumentProcessorTests(unittest.TestCase):
             self.assertTrue(any("amount" in issue.lower() for issue in validation["issues"]))
             self.assertTrue(any("prompt injection" in issue.lower() for issue in validation["issues"]))
 
+    def test_save_document_result_reduces_confidence_for_mismatched_case_data(self):
+        case_id = "CASE-CONFIDENCE-MISMATCH"
+        self._upsert_claim_case(case_id, "Test Customer", "POL-1001", "Medical", 30000.0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claim_file = Path(temp_dir) / "hospital_bill.pdf"
+            claim_file.write_text(
+                "Hospital bill\n"
+                "Date: 5/6/2026\n"
+                "Amount: 200\n"
+                "Claimant: Alex\n",
+                encoding="utf-8",
+            )
+
+            saved = save_document_result(case_id, str(claim_file), document_id=f"DOC-{uuid.uuid4().hex[:8].upper()}")
+
+            self.assertLess(float(saved["confidence"]), 0.3)
+
     def test_clean_document_allows_processing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             claim_file = Path(temp_dir) / "medical_bill.pdf"

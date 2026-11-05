@@ -3,6 +3,11 @@ import re
 from fastmcp import FastMCP
 
 from services.database import get_connection
+from services.document_processor import (
+    _extract_amount,
+    _extract_claimant_name,
+    _required_documents_for_claim_type,
+)
 
 mcp = FastMCP("Documents MCP")
 
@@ -127,28 +132,88 @@ def extract_fields(case_id: str) -> dict:
     }
 
 
+def _required_documents_for_claim_type(claim_type: str | None) -> list[str]:
+    value = (claim_type or "").strip().lower()
+    normalized = "".join(value.split())
+
+    if any(token in normalized for token in ("medical", "health", "hospital", "injury")):
+        return ["medical_bill"]
+    if any(token in normalized for token in ("vehicle", "car", "auto", "motor")):
+        return ["accident_report", "repair_estimate"]
+    if any(token in normalized for token in ("property", "home", "dwelling", "fire")):
+        return ["property_damage_photos", "repair_invoice"]
+    return ["supporting_document"]
+
+
 @mcp.tool()
 def validate_case_documents(case_id: str) -> dict:
-    """Check whether required claim documents are present."""
+    """Check whether required claim documents are present and consistent with the case."""
 
-    documents = _fetch_documents(case_id)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT claimant_name, claim_amount, claim_type, policy_number
+                FROM public.claims
+                WHERE case_id = %s
+                """,
+                (case_id,),
+            )
+            claim = cur.fetchone()
 
-    if not documents:
+    if claim is None:
         return {
-            "success": True,
+            "success": False,
             "complete": False,
-            "missing_documents": [
-                "supporting_document"
-            ],
+            "continue_allowed": False,
+            "issues": ["Claim not found."],
+            "risks": [],
+            "missing_documents": [],
         }
 
-    has_injection = any(bool(doc.get("injection_detected")) for doc in documents)
+    documents = _fetch_documents(case_id)
+    issues: list[str] = []
+    risks: list[str] = []
+    missing_documents: list[str] = []
+
+    if not documents:
+        missing_documents = _required_documents_for_claim_type(claim["claim_type"])
+        issues.append("Missing required supporting document(s) for the claim type.")
+    else:
+        first_document = documents[0]
+        extracted_text = first_document.get("text") or first_document.get("extracted_text") or ""
+        document_claimant = _extract_claimant_name(extracted_text)
+        document_amount = _extract_amount(extracted_text)
+        stored_claimant = (claim["claimant_name"] or "").strip()
+        stored_amount = claim["claim_amount"]
+
+        if document_claimant and stored_claimant and document_claimant.lower() != stored_claimant.lower():
+            issues.append("Claimant name mismatch between document and case record.")
+            risks.append("claimant_name_mismatch")
+
+        if document_amount is not None and stored_amount is not None:
+            if abs(float(document_amount) - float(stored_amount)) > 0.01:
+                issues.append("Amount mismatch between document and claim amount.")
+                risks.append("amount_mismatch")
+
+        confidence = float(first_document.get("confidence") or 0.0)
+        if confidence < 0.6:
+            issues.append("Low confidence extraction requires manual review.")
+            risks.append("low_confidence")
+
+        if bool(first_document.get("injection_detected")):
+            issues.append("Prompt injection detected; safe handling required before workflow continuation.")
+            risks.append("prompt_injection_detected")
+
+    continue_allowed = not bool(issues or missing_documents)
 
     return {
         "success": True,
-        "complete": True,
-        "missing_documents": [],
-        "risks": ["prompt_injection_detected"] if has_injection else [],
+        "complete": continue_allowed,
+        "continue_allowed": continue_allowed,
+        "issues": issues,
+        "risks": risks,
+        "missing_documents": missing_documents,
     }
 
 @mcp.resource("document://{case_id}/{doc_id}")

@@ -71,6 +71,66 @@ def test_clean_claim_routes_to_summary():
     assert result.update["next_step"] == "summary"
 
 
+def test_vehicle_claim_missing_documents_are_specific_to_the_claim_type():
+    state = {
+        "case_id": "CASE-VEHICLE-001",
+        "claim_data": {"claim_type": "Vehicle", "document_text": "", "document_confidence": 0.0},
+    }
+
+    result = workflow.document_node(state)
+
+    assert result["missing_documents"] == ["accident_report", "repair_estimate"]
+
+
+def test_claimant_and_amount_mismatch_block_workflow_continuation():
+    case_id = "CASE-MISMATCH-001"
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM public.claims WHERE case_id = %s",
+                (case_id,),
+            )
+            if cur.fetchone() is None:
+                cur.execute(
+                    """
+                    INSERT INTO public.claims (
+                        case_id,
+                        policy_number,
+                        claimant_name,
+                        claim_type,
+                        claim_amount,
+                        description,
+                        status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'submitted')
+                    """,
+                    (case_id, "POL-1001", "Test Customer", "Medical", 30000.0, "Mismatch validation"),
+                )
+            cur.execute(
+                """
+                INSERT INTO public.documents (
+                    document_id, case_id, file_name, document_type, extracted_text, confidence, injection_detected
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (document_id) DO NOTHING
+                """,
+                (
+                    "DOC-MISMATCH-001",
+                    case_id,
+                    "hospital_bill.pdf",
+                    "medical_bill",
+                    "Hospital bill\nDate: 5/6/2026\nAmount: 200\nClaimant: Alex",
+                    0.65,
+                    False,
+                ),
+            )
+            conn.commit()
+
+    result = workflow.mcp_validation_node({"case_id": case_id, "claim_data": {"policy_number": "POL-1001", "claim_type": "Medical", "claim_amount": 30000.0}})
+
+    assert result["document_validation"]["continue_allowed"] is False
+    assert "amount_mismatch" in result["document_validation"]["risks"]
+    assert "claimant_name_mismatch" in result["document_validation"]["risks"]
+
+
 def test_missing_document_routes_to_await_documents(monkeypatch):
     monkeypatch.setattr(
         workflow,
