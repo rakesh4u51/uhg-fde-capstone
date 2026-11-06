@@ -6,6 +6,7 @@ from typing import Any
 from models.document_models import DocumentProcessingResult
 from security.injection_guard import detect_prompt_injection
 from security.pii_guard import redact_pii
+from services.audit import record_audit
 from services.database import get_connection
 
 try:  # Docling is optional in this lab environment.
@@ -35,8 +36,21 @@ DATE_PATTERNS = [
 ]
 
 
+def _sanitize_text_for_postgres(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+
+    text = text.replace("\x00", "").replace("\u0000", "")
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    return text
+
+
 def _normalize_text(value: str) -> str:
-    text = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = _sanitize_text_for_postgres(value).replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(
         r"(?<=[A-Za-z0-9])\s+(?=(?:Claimant|Patient|Insured|Policyholder|Policy|Amount|Service|Date|Contact|Provider|Claim|Status|Description|Summary|DOB|Date of Birth))",
         "\n",
@@ -122,26 +136,30 @@ def _extract_policy_number(text: str) -> str | None:
 
 
 def _extract_amount(text: str) -> float | None:
-    match = None
+    normalized = "\n".join(str(text or "").splitlines())
+    amount_match = None
+
     for pattern in (
+        re.compile(r"(?:amount|claim\s*amount|total\s*due|invoice\s*total)\s*[:\-]?\s*(?:\$\s?)?(\d[\d,]*(?:\.\d{2})?)", re.IGNORECASE),
         re.compile(r"\$\s?\d[\d,]*(?:\.\d{2})?", re.IGNORECASE),
         re.compile(r"\b\d[\d,]*(?:\.\d{2})?\s*(?:USD|US\$)\b", re.IGNORECASE),
-        re.compile(r"\b\d[\d,]*(?:\.\d{2})?\b"),
     ):
-        for candidate in pattern.finditer(text):
-            raw = candidate.group(0).replace(",", "").replace("$", "").replace("USD", "").replace("US$", "").strip()
+        for candidate in pattern.finditer(normalized):
+            raw = candidate.group(1) if candidate.lastindex else candidate.group(0)
+            raw = raw.replace(",", "").replace("$", "").replace("USD", "").replace("US$", "").strip()
             if not raw:
                 continue
             try:
                 value = float(raw)
                 if value > 0:
-                    match = value
+                    amount_match = value
                     break
             except ValueError:
                 continue
-        if match is not None:
+        if amount_match is not None:
             break
-    return match
+
+    return amount_match
 
 
 def _extract_service_date(text: str) -> str | None:
@@ -278,12 +296,14 @@ def save_document_result(
         document_id = f"DOC-{uuid.uuid4().hex[:8].upper()}"
 
     path = Path(file_path)
+    sanitized_extracted_text = _sanitize_text_for_postgres(result.extracted_text)
+    result.extracted_text = sanitized_extracted_text
     payload = {
         "document_id": document_id,
         "case_id": case_id,
         "file_name": path.name,
         "document_type": result.document_type,
-        "extracted_text": result.extracted_text,
+        "extracted_text": sanitized_extracted_text,
         "confidence": float(result.confidence),
         "injection_detected": bool(result.injection_detected),
     }
@@ -325,6 +345,20 @@ def save_document_result(
                 payload.update(dict(row))
             conn.commit()
 
+    record_audit(
+        case_id,
+        "document_agent",
+        "document_persisted",
+        {
+            "document_id": payload.get("document_id"),
+            "file_name": payload.get("file_name"),
+            "document_type": payload.get("document_type"),
+            "confidence": payload.get("confidence"),
+            "injection_detected": bool(payload.get("injection_detected")),
+        },
+        stage="documents_complete",
+    )
+
     return payload
 
 
@@ -363,9 +397,10 @@ def process_document(file_path: str) -> DocumentProcessingResult:
             extracted_text = ""
 
     normalized = _normalize_text(extracted_text)
+    normalized = _sanitize_text_for_postgres(normalized)
     injection = detect_prompt_injection(normalized)
     pii = redact_pii(normalized)
-    safe_text = pii["text"]
+    safe_text = _sanitize_text_for_postgres(pii["text"])
 
     claimant_name = _extract_claimant_name(safe_text)
     policy_number = _extract_policy_number(safe_text)

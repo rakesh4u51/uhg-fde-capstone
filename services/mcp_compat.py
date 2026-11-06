@@ -25,15 +25,28 @@ class CompatibleMCPTool:
         if not self.args_schema:
             self.args_schema = self.inputSchema
 
-    async def ainvoke(self, arguments: dict[str, Any] | None = None) -> Any:
-        if self.client is None:
-            raise RuntimeError("MCP client is not initialized.")
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return self.inputSchema
 
-        payload = arguments or {}
-        result = await self.client.call_tool(self.name, payload)
+    @property
+    def inputSchema(self) -> dict[str, Any]:
+        return self.__dict__.get("inputSchema", {})
+
+    @inputSchema.setter
+    def inputSchema(self, value: dict[str, Any]) -> None:
+        self.__dict__["inputSchema"] = value
+
+    async def ainvoke(self, arguments: dict[str, Any]) -> Any:
+        if self.client is None:
+            raise RuntimeError("This MCP tool is not bound to a client.")
+        result = await self.client.call_tool(self.name, arguments)
         if hasattr(result, "data"):
             return result.data
         return result
+
+    async def invoke(self, arguments: dict[str, Any]) -> Any:
+        return await self.ainvoke(arguments)
 
 
 class MCPAdapter:
@@ -48,15 +61,18 @@ class MCPAdapter:
         self.client = Client(self.server)
         await self.client.__aenter__()
         raw_tools = await self.client.list_tools()
-        self._tools = [
-            CompatibleMCPTool(
-                name=getattr(tool, "name", ""),
-                description=getattr(tool, "description", "") or "",
-                inputSchema=getattr(tool, "inputSchema", {}) or {},
-                client=self.client,
+        self._tools = []
+        for tool in raw_tools:
+            raw = getattr(tool, "__dict__", {})
+            input_schema = raw.get("input_schema") or raw.get("inputSchema") or {}
+            self._tools.append(
+                CompatibleMCPTool(
+                    name=getattr(tool, "name", ""),
+                    description=getattr(tool, "description", "") or "",
+                    inputSchema=input_schema,
+                    client=self.client,
+                )
             )
-            for tool in raw_tools
-        ]
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

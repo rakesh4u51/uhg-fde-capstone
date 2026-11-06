@@ -22,6 +22,7 @@ ALLOWED_SUMMARY_TOOLS = {
     "classify_document",
     "extract_fields",
     "validate_case_documents",
+    "save_summary",
 }
 
 

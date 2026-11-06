@@ -8,6 +8,8 @@ from typing import Any, Callable
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
+from services.audit import record_audit
+
 load_dotenv()
 
 MAILPIT_HOST = os.getenv("MAILPIT_HOST", "localhost")
@@ -60,7 +62,19 @@ def notify_missing_documents(case_id: str, recipient: str, missing_documents: li
         + ", ".join(missing_documents)
         + "."
     )
-    return send_mailpit_email(recipient, subject, body)
+    result = send_mailpit_email(recipient, subject, body)
+    record_audit(
+        case_id,
+        "workflow_mcp",
+        "notification_sent",
+        {
+            "notification_type": "missing_documents",
+            "recipient": recipient,
+            "subject": subject,
+            "missing_documents": list(missing_documents),
+        },
+    )
+    return result
 
 
 def notify_approval_request(case_id: str, approver: str, claim_amount: float | int) -> dict[str, Any]:
@@ -70,13 +84,36 @@ def notify_approval_request(case_id: str, approver: str, claim_amount: float | i
         f"Claim amount: {float(claim_amount):,.2f}. "
         f"Reviewer: {approver}."
     )
-    return send_mailpit_email(approver.lower().replace(" ", ".") + "@example.com", subject, body)
+    result = send_mailpit_email(approver.lower().replace(" ", ".") + "@example.com", subject, body)
+    record_audit(
+        case_id,
+        "workflow_mcp",
+        "notification_sent",
+        {
+            "notification_type": "approval_request",
+            "recipient": approver.lower().replace(" ", ".") + "@example.com",
+            "subject": subject,
+            "claim_amount": float(claim_amount),
+        },
+    )
+    return result
 
 
 def notify_sla_escalation(case_id: str, recipient: str, delay_hours: float = 24.0) -> dict[str, Any]:
     subject = f"SLA escalation for {case_id}"
     body = f"Case {case_id} has reached the SLA escalation threshold after {delay_hours} hours."
-    return send_mailpit_email(recipient, subject, body)
+    result = send_mailpit_email(recipient, subject, body)
+    record_audit(
+        case_id,
+        "sla_agent",
+        "sla_escalated",
+        {
+            "recipient": recipient,
+            "delay_hours": float(delay_hours),
+            "reason": "sla_threshold_reached",
+        },
+    )
+    return result
 
 
 def schedule_case_follow_up(

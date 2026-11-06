@@ -150,6 +150,32 @@ class DocumentProcessorTests(unittest.TestCase):
 
             self.assertEqual(row["row_count"], 1)
 
+    def test_save_document_result_strips_null_bytes_before_postgres_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claim_file = Path(temp_dir) / "medical_bill.png"
+            claim_file.write_bytes(b"\x89PNG\x00\x00\x00\x00Claimant Name: Jane Smith\x00\nPolicy Number: POL-2002\n")
+
+            document_id = f"DOC-NULL-{uuid.uuid4().hex[:8].upper()}"
+            saved = save_document_result(
+                case_id="CASE-001",
+                file_path=str(claim_file),
+                document_id=document_id,
+            )
+
+            self.assertNotIn("\x00", saved["extracted_text"])
+            self.assertIn("Jane Smith", saved["extracted_text"])
+
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT extracted_text FROM public.documents WHERE document_id = %s",
+                        (document_id,),
+                    )
+                    row = cur.fetchone()
+
+            self.assertIsNotNone(row)
+            self.assertNotIn("\x00", row["extracted_text"])
+
     def test_validate_document_case_blocks_unsafe_documents(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             claim_file = Path(temp_dir) / "medical_bill.pdf"

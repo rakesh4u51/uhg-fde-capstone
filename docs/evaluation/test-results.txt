@@ -1,0 +1,75 @@
+Command: python -m py_compile app/streamlit_app.py graph/state.py graph/workflow_v2.py graph/v2_graph_factory.py services/database.py services/document_processor.py services/v2_agent_runner.py
+Exit code: 0
+
+Command: python -m tests.test_all_mcp
+Exit code: 0
+
+Command: python -m tests.test_security
+Exit code: 0
+
+Command: python -m tests.test_v2_human_review
+Exit code: 0
+
+Command: python -m tests.test_postgres_human_review
+Exit code: 0
+
+Command: python -m pytest tests -q
+Exit code: 1
+Reason: scenario-level failures remain in the evaluation suite; repository is not release-ready.
+
+Command: PYTHONPATH=. python evaluation/scenario_eval.py
+Exit code: 1
+Reason: scenario evaluation still reports route/status mismatches.
+
+==============================
+STARTING CLAIM WORKFLOW
+==============================
+
+[0] Running MCP Validation
+
+[1] Running Intake Agent
+
+[2] Running Document Agent
+
+[3] Running Summary Agent
+
+[4] Running Routing Agent
+
+[5] Running SLA Agent
+
+[6] Requesting Human Approval via MCP
+
+[6] Waiting for Human Review
+
+==============================
+WORKFLOW PAUSED FOR HUMAN
+==============================
+Case: CASE-PG-62370E6E
+Status: awaiting_human_review
+Stage: approval_requested
+
+==============================
+SIMULATING HUMAN REVIEW
+==============================
+
+[6] Waiting for Human Review
+
+[7] Finalizing Case
+
+==============================
+WORKFLOW RESUMED
+==============================
+Case: CASE-PG-62370E6E
+Human Decision: approved
+Rationale: Reviewed claim evidence and supporting information.
+Reviewer: Demo Approver
+Final Status: completed
+Final Stage: finalized
+Final Result: Human decision: approved. Reviewer: Demo Approver. Rationale: Reviewed claim evidence and supporting information.
+
+==============================
+HUMAN REVIEW TEST COMPLETE
+==============================
+EXIT:0
+
+CMD: python -m pytest tests -q

@@ -1,73 +1,64 @@
-import asyncio
+import pytest
 
-from agents.summary_agent_v2 import (
-    build_summary_agent,
+from agents.summary_agent_v2 import build_grounded_summary
+
+
+@pytest.mark.parametrize(
+    ("case", "policy", "coverage", "validation", "expected_text"),
+    [
+        (
+            {"case_id": "CASE-100", "claim_type": "Medical", "claim_amount": 25000},
+            {"policy_number": "POL-1001", "status": "active", "coverage_limit": 50000, "covered_claim_types": ["Medical"]},
+            {"covered": True, "reason": "Claim is within policy coverage"},
+            {"missing_documents": [], "risks": [], "issues": []},
+            "POL-1001",
+        ),
+        (
+            {"case_id": "CASE-101", "claim_type": "Medical", "claim_amount": 25000},
+            {"policy_number": "POL-1001", "status": "active", "coverage_limit": 50000, "covered_claim_types": ["Medical"]},
+            {"covered": True, "reason": "Claim is within policy coverage"},
+            {"missing_documents": ["medical_bill"], "risks": [], "issues": []},
+            "medical_bill",
+        ),
+        (
+            {"case_id": "CASE-102", "claim_type": "Medical", "claim_amount": 30000},
+            {"policy_number": "POL-1001", "status": "active", "coverage_limit": 50000, "covered_claim_types": ["Medical"]},
+            {"covered": True, "reason": "Claim is within policy coverage"},
+            {"missing_documents": [], "risks": ["amount_mismatch"], "issues": ["Amount mismatch between document and claim amount."]},
+            "amount_mismatch",
+        ),
+        (
+            {"case_id": "CASE-103", "claim_type": "Medical", "claim_amount": 25000},
+            {"policy_number": "POL-1001", "status": "active", "coverage_limit": 50000, "covered_claim_types": ["Medical"]},
+            {"covered": True, "reason": "Claim is within policy coverage"},
+            {"missing_documents": [], "risks": ["prompt_injection_detected"], "issues": ["Prompt injection detected; document handling was restricted."]},
+            "prompt_injection_detected",
+        ),
+        (
+            {"case_id": "CASE-104", "claim_type": "Medical", "claim_amount": 75000},
+            {"policy_number": "POL-1001", "status": "active", "coverage_limit": 50000, "covered_claim_types": ["Medical"]},
+            {"covered": False, "reason": "Claim amount exceeds policy limit"},
+            {"missing_documents": [], "risks": ["policy_limit_exceeded"], "issues": ["Claim amount exceeds policy limit"]},
+            "exceeds policy limit",
+        ),
+    ],
 )
+def test_grounded_summary_includes_policy_references(case, policy, coverage, validation, expected_text):
+    summary = build_grounded_summary(
+        case_id=case["case_id"],
+        case=case,
+        policy=policy,
+        coverage=coverage,
+        documents=[{"document_type": "medical_bill"}],
+        fields={"claimant_name": "Test Customer", "claim_type": case["claim_type"]},
+        validation=validation,
+    )
 
-
-async def main():
-    (
-        agent,
-        case_adapter,
-        policy_adapter,
-        document_adapter,
-    ) = await build_summary_agent()
-
-    try:
-        result = await agent.ainvoke(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": """
-Prepare a grounded human-review summary
-for claim CASE-001.
-
-Use the available MCP tools to retrieve:
-
-1. The claim.
-2. Its policy.
-3. Coverage information.
-4. Claim documents.
-5. Extracted document fields.
-6. Document-completeness information.
-
-Return:
-
-FACTS:
-EVIDENCE:
-POLICY STATUS:
-MISSING INFORMATION:
-RISKS:
-VALIDATION ISSUES:
-NEXT ACTION:
-
-Do not make a final claim decision.
-""",
-                    }
-                ]
-            }
-        )
-
-        print("\n========================")
-        print("SUMMARY AGENT V2 RESULT")
-        print("========================")
-
-        final_message = result["messages"][-1]
-
-        print(final_message.content)
-
-    finally:
-        await case_adapter.__aexit__(
-            None, None, None
-        )
-        await policy_adapter.__aexit__(
-            None, None, None
-        )
-        await document_adapter.__aexit__(
-            None, None, None
-        )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    assert "FACTS:" in summary
+    assert "EVIDENCE:" in summary
+    assert "POLICY AND COVERAGE:" in summary
+    assert "Policy References:" in summary
+    assert expected_text in summary
+    assert "approved" not in summary.lower()
+    assert "rejected" not in summary.lower()
+    assert "settled" not in summary.lower()

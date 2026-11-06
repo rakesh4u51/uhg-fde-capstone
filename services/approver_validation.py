@@ -83,16 +83,19 @@ def validate_approver_limit(approver_name: str, claim_amount: float | int, staff
             "reason": "demo fallback configuration applied." if valid else "demo fallback configuration rejected this claim amount.",
         }
 
+    active = bool(approver.get("active", True))
+    role = str(approver.get("role", "")).lower()
+    is_approver_role = role in {"approver", "adjuster", "supervisor", "director"}
     limit = float(approver.get("approval_limit", 0) or 0)
     claim_value = float(claim_amount)
-    valid = claim_value <= limit
+    valid = active and is_approver_role and claim_value <= limit
     return {
         "approver": approver.get("name"),
         "approval_limit": limit,
         "claim_amount": claim_value,
         "valid": valid,
         "source": "public.staff",
-        "reason": "Approved within approver limit." if valid else "Claim amount exceeds approver approval limit.",
+        "reason": "Approved within approver limit and active approver role." if valid else "Claim amount exceeds approver approval limit or approver is inactive or not authorized.",
     }
 
 

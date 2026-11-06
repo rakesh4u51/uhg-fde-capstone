@@ -1,20 +1,22 @@
 from langgraph.types import Command
 
 from graph.workflow_postgres import graph
+from services.database import get_connection
 
 
+case_id = "CASE-PG-" + __import__("uuid").uuid4().hex[:8].upper()
 config = {
     "configurable": {
-        "thread_id": "CASE-001-PG-TEST"
+        "thread_id": f"{case_id}-PG-TEST"
     }
 }
 
 
 initial_state = {
-    "case_id": "CASE-001",
+    "case_id": case_id,
 
     "claim_data": {
-        "case_id": "CASE-001",
+        "case_id": case_id,
         "policy_number": "POL-1001",
         "claimant_name": "Test Customer",
         "claim_type": "Medical",
@@ -36,6 +38,40 @@ initial_state = {
     "errors": [],
 }
 
+
+with get_connection() as conn:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO public.claims (
+                case_id, policy_number, claimant_name, claim_type, claim_amount, description, status
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'submitted')
+            ON CONFLICT (case_id) DO UPDATE SET
+                policy_number = EXCLUDED.policy_number,
+                claimant_name = EXCLUDED.claimant_name,
+                claim_type = EXCLUDED.claim_type,
+                claim_amount = EXCLUDED.claim_amount,
+                description = EXCLUDED.description,
+                status = EXCLUDED.status
+            """,
+            (case_id, "POL-1001", "Test Customer", "Medical", 25000.0, "Hospital treatment claim with medical bill."),
+        )
+        cur.execute(
+            """
+            INSERT INTO public.documents (
+                document_id, case_id, file_name, document_type, extracted_text, confidence, injection_detected
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (document_id) DO UPDATE SET
+                case_id = EXCLUDED.case_id,
+                file_name = EXCLUDED.file_name,
+                document_type = EXCLUDED.document_type,
+                extracted_text = EXCLUDED.extracted_text,
+                confidence = EXCLUDED.confidence,
+                injection_detected = EXCLUDED.injection_detected
+            """,
+            (f"DOC-{case_id}", case_id, "medical_bill.pdf", "medical_bill", "Hospital bill for Test Customer. Total amount 25000.", 0.98, False),
+        )
+    conn.commit()
 
 print("\n==============================")
 print("STARTING CLAIM WORKFLOW")

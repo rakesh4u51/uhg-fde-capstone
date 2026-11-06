@@ -226,7 +226,21 @@ def _case_record(case_id: str) -> dict[str, Any] | None:
             row = cur.fetchone()
     if row is None:
         return None
+    row["status"] = _canonical_case_status(row.get("status"))
     return row
+
+
+def _canonical_case_status(status: Any) -> str:
+    value = str(status or "").strip().lower()
+    if not value:
+        return ""
+    aliases = {
+        "awaiting_document": "awaiting_documents",
+        "awaiting_documents2": "awaiting_documents",
+        "awaiting_documents_2": "awaiting_documents",
+        "documents_waiting": "awaiting_documents",
+    }
+    return aliases.get(value, value)
 
 
 def _queue_cases() -> list[dict[str, Any]]:
@@ -246,7 +260,91 @@ def _queue_cases() -> list[dict[str, Any]]:
                 """
             )
             rows = cur.fetchall()
+    for row in rows:
+        row["status"] = _canonical_case_status(row.get("status"))
     return rows
+
+
+def _requested_documents_for_case(case_id: str) -> list[str]:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT details
+                FROM public.claim_audit
+                WHERE case_id = %s AND action = 'documents_requested'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (case_id,),
+            )
+            row = cur.fetchone()
+    details = row.get("details") if row else {}
+    if isinstance(details, dict):
+        requested = details.get("requested_documents") or details.get("missing_documents") or ["supporting_document"]
+        return [str(doc).strip() for doc in requested if str(doc).strip()]
+    if isinstance(details, str):
+        return [details.strip()] if details.strip() else ["supporting_document"]
+    return ["supporting_document"]
+
+
+def _resume_existing_case_documents(case_id: str, uploaded_files) -> dict[str, Any]:
+    if not case_id:
+        raise ValueError("A case_id is required to resume an existing case.")
+
+    if not uploaded_files:
+        raise ValueError("At least one document is required before resuming the case workflow.")
+
+    thread_id = _get_thread_id(case_id, create_if_missing=False)
+    if not thread_id:
+        raise ValueError(f"No persisted workflow execution was found for case {case_id}.")
+
+    saved: list[dict[str, Any]] = []
+    for uploaded_file in uploaded_files or []:
+        if uploaded_file is None or not getattr(uploaded_file, "name", None):
+            continue
+        upload_dir = Path("uploads") / case_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        destination = upload_dir / uploaded_file.name
+        destination.write_bytes(uploaded_file.getvalue())
+        processed = process_document(str(destination))
+        document_id = f"DOC-{uuid.uuid4().hex[:8].upper()}"
+        payload = save_document_result(case_id, str(destination), document_id=document_id, result=processed)
+        saved.append(payload)
+
+    if not saved:
+        raise ValueError("No document was saved for the selected case.")
+
+    latest = saved[-1]
+    resume_payload = {
+        "case_id": case_id,
+        "document_id": latest.get("document_id"),
+        "document_text": latest.get("extracted_text") or "",
+        "document_type": latest.get("document_type") or "unknown",
+        "document_confidence": float(latest.get("confidence") or 0.0),
+    }
+
+    async def _run() -> dict[str, Any]:
+        async with get_v2_graph() as graph:
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot = await graph.aget_state(config)
+            state_values = snapshot.values if snapshot else {}
+            if not state_values:
+                raise ValueError(f"No LangGraph checkpoint exists for thread {thread_id}.")
+            if "claim_data" not in state_values:
+                raise ValueError("The persisted LangGraph checkpoint does not contain claim_data.")
+            current_stage = state_values.get("current_stage")
+            current_status = _canonical_case_status(state_values.get("status"))
+            allowed_stages = {"awaiting_documents", "documents_revalidated", "manual_review", "manual_review_held"}
+            allowed_statuses = {"awaiting_documents", "manual_review", "manual_review_held", "documents_revalidated"}
+            if current_stage not in allowed_stages and current_status not in allowed_statuses:
+                raise ValueError(
+                    "The case is not currently paused for document resubmission. "
+                    f"Stage: {current_stage}; status: {current_status}."
+                )
+            return await graph.ainvoke(Command(resume=resume_payload), config=config)
+
+    return asyncio.run(_run())
 
 
 def _list_documents(case_id: str) -> list[dict[str, Any]]:
@@ -354,33 +452,305 @@ def _hydrate_claim_data(case_id: str, claim_data: dict[str, Any] | None) -> dict
 
     return payload
 
+def _initialize_workflow_thread_table() -> None:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS
+                public.claim_workflow_threads
+                (
+                    case_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    created_at TIMESTAMPTZ
+                        NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ
+                        NOT NULL DEFAULT NOW()
+                )
+                """
+            )
 
-def _new_thread_id(case_id: str) -> str:
-    return f"{case_id}-{uuid.uuid4().hex[:12]}"
+        conn.commit()
 
 
-def _get_thread_id(case_id: str) -> str:
-    thread_map = st.session_state.setdefault("workflow_threads", {})
-    if case_id not in thread_map:
-        thread_map[case_id] = _new_thread_id(case_id)
-    return thread_map[case_id]
+def _new_thread_id(
+    case_id: str,
+) -> str:
+    return (
+        f"{case_id}-"
+        f"{uuid.uuid4().hex[:12]}"
+    )
 
 
-def _resume_human_review(case_id: str, human_input: dict[str, str]) -> dict[str, Any]:
-    thread_id = _get_thread_id(case_id)
+def _save_thread_id(
+    case_id: str,
+    thread_id: str,
+) -> None:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO
+                    public.claim_workflow_threads
+                (
+                    case_id,
+                    thread_id
+                )
+                VALUES (%s, %s)
+                ON CONFLICT (case_id)
+                DO UPDATE SET
+                    thread_id = EXCLUDED.thread_id,
+                    updated_at = NOW()
+                """,
+                (
+                    case_id,
+                    thread_id,
+                ),
+            )
+
+        conn.commit()
+
+    st.session_state.setdefault(
+        "workflow_threads",
+        {},
+    )[case_id] = thread_id
+
+
+def _get_thread_id(
+    case_id: str,
+    create_if_missing: bool = False,
+) -> str | None:
+    thread_map = st.session_state.setdefault(
+        "workflow_threads",
+        {},
+    )
+
+    session_thread_id = thread_map.get(
+        case_id
+    )
+
+    if session_thread_id:
+        return session_thread_id
+
+    with psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT thread_id
+                FROM public.claim_workflow_threads
+                WHERE case_id = %s
+                """,
+                (case_id,),
+            )
+
+            row = cur.fetchone()
+
+    if row:
+        thread_id = row["thread_id"]
+
+        thread_map[case_id] = thread_id
+
+        return thread_id
+
+    if not create_if_missing:
+        return None
+
+    thread_id = _new_thread_id(
+        case_id
+    )
+
+    _save_thread_id(
+        case_id,
+        thread_id,
+    )
+
+    return thread_id
+
+
+def _resume_manual_review(
+    case_id: str,
+    manual_input: dict[str, Any],
+) -> dict[str, Any]:
+    thread_id = _get_thread_id(
+        case_id,
+        create_if_missing=False,
+    )
+
+    if not thread_id:
+        raise ValueError(
+            "No persisted workflow execution was found for case "
+            f"{case_id}. Start the claim workflow before submitting a manual review decision."
+        )
+
+    print("[Manual Review] case_id:", case_id)
+    print("[Manual Review] thread_id:", thread_id)
+
     async def _run() -> dict[str, Any]:
         async with get_v2_graph() as graph:
-            return await graph.ainvoke(
-                Command(resume=human_input),
-                config={"configurable": {"thread_id": thread_id}},
-            )
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot = await graph.aget_state(config)
+            state_values = snapshot.values if snapshot else {}
+
+            if not state_values:
+                raise ValueError(f"No LangGraph checkpoint exists for thread {thread_id}.")
+            if "claim_data" not in state_values:
+                raise ValueError("The persisted LangGraph checkpoint does not contain claim_data.")
+
+            current_stage = state_values.get("current_stage")
+            current_status = state_values.get("status")
+            allowed_stages = {"manual_review", "manual_review_held", "documents_revalidated", "awaiting_documents"}
+            allowed_statuses = {"manual_review", "manual_review_held", "awaiting_documents"}
+
+            if current_stage not in allowed_stages and current_status not in allowed_statuses:
+                raise ValueError(
+                    "The case is not currently paused for Manual Review. "
+                    f"Stage: {current_stage}; status: {current_status}."
+                )
+
+            return await graph.ainvoke(Command(resume=manual_input), config=config)
 
     return asyncio.run(_run())
 
 
-def _start_case_workflow(case_id: str, claim_data: dict[str, Any], thread_id: str | None = None) -> dict[str, Any]:
-    thread_id = thread_id or _get_thread_id(case_id)
+def _resume_human_review(
+    case_id: str,
+    human_input: dict[str, str],
+) -> dict[str, Any]:
+    thread_id = _get_thread_id(
+        case_id,
+        create_if_missing=False,
+    )
+
+    if not thread_id:
+        raise ValueError(
+            "No persisted workflow execution "
+            f"was found for case {case_id}. "
+            "Start the claim workflow before "
+            "submitting a human decision."
+        )
+
+    print(
+        "[Human Review] case_id:",
+        case_id,
+    )
+
+    print(
+        "[Human Review] thread_id:",
+        thread_id,
+    )
+
+    async def _run() -> dict[str, Any]:
+        async with get_v2_graph() as graph:
+            config = {
+                "configurable": {
+                    "thread_id": thread_id,
+                }
+            }
+
+            snapshot = await graph.aget_state(
+                config
+            )
+
+            state_values = (
+                snapshot.values
+                if snapshot
+                else {}
+            )
+
+            print(
+                "[Human Review] state keys:",
+                sorted(state_values.keys()),
+            )
+
+            print(
+                "[Human Review] stage:",
+                state_values.get(
+                    "current_stage"
+                ),
+            )
+
+            print(
+                "[Human Review] status:",
+                state_values.get(
+                    "status"
+                ),
+            )
+
+            print(
+                "[Human Review] "
+                "claim_data exists:",
+                "claim_data" in state_values,
+            )
+
+            if not state_values:
+                raise ValueError(
+                    "No LangGraph checkpoint "
+                    f"exists for thread {thread_id}."
+                )
+
+            if "claim_data" not in state_values:
+                raise ValueError(
+                    "The persisted LangGraph "
+                    "checkpoint does not contain "
+                    "claim_data. This case may have "
+                    "been created before workflow "
+                    "thread persistence was enabled."
+                )
+
+            current_stage = state_values.get(
+                "current_stage"
+            )
+
+            current_status = state_values.get(
+                "status"
+            )
+
+            allowed_stages = {
+                "sla_complete",
+                "approval_requested",
+                "human_review",
+            }
+
+            allowed_statuses = {
+                "awaiting_human_review",
+            }
+
+            if (
+                current_stage not in allowed_stages
+                and current_status
+                not in allowed_statuses
+            ):
+                raise ValueError(
+                    "The case is not currently "
+                    "paused for Human Review. "
+                    f"Stage: {current_stage}; "
+                    f"status: {current_status}."
+                )
+
+            return await graph.ainvoke(
+                Command(
+                    resume=human_input
+                ),
+                config=config,
+            )
+
+    return asyncio.run(
+        _run()
+    )
+
+
+def _start_case_workflow(
+    case_id: str,
+    claim_data: dict[str, Any],
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    thread_id = thread_id or _new_thread_id(case_id)
+    _save_thread_id(case_id, thread_id)
     st.session_state.setdefault("workflow_threads", {})[case_id] = thread_id
+
     initial_state = {
         "case_id": case_id,
         "claim_data": claim_data,
@@ -388,6 +758,9 @@ def _start_case_workflow(case_id: str, claim_data: dict[str, Any], thread_id: st
         "status": "submitted",
         "errors": [],
     }
+
+    print("[Workflow Start] case_id:", case_id)
+    print("[Workflow Start] thread_id:", thread_id)
 
     async def _run() -> dict[str, Any]:
         async with get_v2_graph() as graph:
@@ -398,12 +771,6 @@ def _start_case_workflow(case_id: str, claim_data: dict[str, Any], thread_id: st
 
     return asyncio.run(_run())
 
-
-st.set_page_config(
-    page_title="Intelligent Claims Processing",
-    page_icon="⚕️",
-    layout="wide",
-)
 
 if "workflow_result" not in st.session_state:
     st.session_state.workflow_result = None
@@ -434,7 +801,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.divider()
-
+_initialize_workflow_thread_table()
 if page == "Submit Claim":
     st.header("Submit Claim")
     with st.form("claim_form"):
@@ -469,10 +836,10 @@ if page == "Submit Claim":
                 }
                 claim_data = _hydrate_claim_data(case_id, claim_data)
                 thread_id = _new_thread_id(case_id)
-                st.session_state.setdefault("workflow_threads", {})[case_id] = thread_id
                 print("[UI] Starting LangGraph:", thread_id)
+                record_audit(case_id, "streamlit_ui", "claim_registered", {"policy_number": policy_number, "claim_type": claim_type, "claim_amount": float(claim_amount)})
                 result = _start_case_workflow(case_id, claim_data, thread_id=thread_id)
-                record_audit(case_id, "streamlit_ui", "claim_submitted", {"policy_number": policy_number, "claim_type": claim_type, "claim_amount": float(claim_amount)})
+                record_audit(case_id, "langgraph_supervisor", "workflow_started", {"thread_id": thread_id, "initial_stage": "submitted"}, stage="submitted")
                 st.session_state.workflow_result = result
                 st.session_state.selected_case = case_id
                 st.success("Claim submitted and workflow started.")
@@ -508,12 +875,13 @@ elif page == "Case Workspace":
             st.info("Case not found.")
         else:
             col1, col2, col3 = st.columns(3)
+            canonical_status = _canonical_case_status(case.get("status"))
             with col1:
                 st.metric("Case ID", case.get("case_id"))
             with col2:
-                st.metric("Status", case.get("status"))
+                st.metric("Status", canonical_status)
             with col3:
-                st.metric("Stage", case.get("status") or "unknown")
+                st.metric("Stage", canonical_status or "unknown")
 
             st.subheader("Claim Information")
             st.write({
@@ -523,6 +891,33 @@ elif page == "Case Workspace":
                 "Amount": case.get("claim_amount"),
                 "Description": case.get("description"),
             })
+
+            if canonical_status == "awaiting_documents":
+                requested_documents = _requested_documents_for_case(selected_case)
+                st.subheader("Additional Documents Required")
+                st.write(f"Case: {selected_case}")
+                st.write(f"Requested Documents: {', '.join(requested_documents)}")
+                if documents:
+                    st.write("Existing Documents:")
+                    for document in documents:
+                        st.write(f"- {document.get('file_name')} ({document.get('document_type')})")
+                uploaded_document = st.file_uploader(
+                    "Upload Additional Document",
+                    type=["pdf", "png", "jpg", "jpeg"],
+                    accept_multiple_files=False,
+                    key=f"upload_additional_document_{selected_case}",
+                )
+                if st.button("Submit Documents & Resume Workflow", key=f"resume_case_documents_{selected_case}"):
+                    if uploaded_document is None:
+                        st.warning("Upload a replacement or additional document before resuming the case.")
+                    else:
+                        try:
+                            result = _resume_existing_case_documents(selected_case, [uploaded_document])
+                            st.session_state.workflow_result = result
+                            st.success(f"Document uploaded and case {selected_case} resumed on the original workflow thread.")
+                            st.write(result.get("status") or "awaiting_documents")
+                        except Exception as exc:
+                            st.error(f"Unable to resume existing case workflow: {exc}")
 
             if documents:
                 st.subheader("Documents")
@@ -540,15 +935,44 @@ elif page == "Case Workspace":
                 st.subheader("Summary")
                 st.write(case.get("summary"))
 
+            st.subheader("Case Timeline")
+            with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, case_id, actor, action, details, created_at
+                        FROM public.claim_audit
+                        WHERE case_id = %s
+                        ORDER BY created_at ASC
+                        """,
+                        (selected_case,),
+                    )
+                    timeline_rows = cur.fetchall()
+            if not timeline_rows:
+                st.info("No audit events recorded for this case yet.")
+            else:
+                for row in timeline_rows:
+                    details = row.get("details") or {}
+                    safe_text = ""
+                    if isinstance(details, dict):
+                        safe_pairs = []
+                        for key, value in details.items():
+                            if key == "_audit_key":
+                                continue
+                            safe_pairs.append(f"{key}: {value}")
+                        safe_text = "; ".join(safe_pairs) if safe_pairs else "No additional detail"
+                    with st.expander(f"{row.get('created_at').strftime('%Y-%m-%d %H:%M:%S')} — {row.get('actor')} — {row.get('action')}"):
+                        st.write(safe_text)
+
 elif page == "Manual Review":
     st.header("Manual Review")
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT case_id, claimant_name, claim_type, claim_amount, status, summary, description
+                SELECT case_id, claimant_name, claim_type, claim_amount, status, summary, description, policy_number
                 FROM public.claims
-                WHERE status = 'manual_review'
+                WHERE status IN ('manual_review', 'manual_review_held')
                 ORDER BY updated_at DESC
                 """
             )
@@ -565,15 +989,74 @@ elif page == "Manual Review":
             status = row.get("status")
             summary = row.get("summary")
             description = row.get("description")
+            policy_number = row.get("policy_number")
+            documents = _list_documents(case_id)
+            confidence = max((float(doc.get("confidence") or 0.0) for doc in documents), default=0.0)
+            validation_issues = []
+            risks = []
+            security_flags = []
+            for doc in documents:
+                validation_issues.extend(doc.get("validation_issues") or [])
+                risks.extend(doc.get("risks") or [])
+                security_flags.extend(doc.get("security_flags") or [])
+
             with st.expander(f"{case_id} - {claimant_name}"):
                 st.write({
+                    "Case ID": case_id,
+                    "Policy Number": policy_number,
+                    "Claimant": claimant_name,
                     "Claim Type": claim_type,
                     "Claim Amount": claim_amount,
-                    "Current Stage": status,
                     "Status": status,
                     "Description": description,
+                    "Document Confidence": confidence,
+                    "Validation Issues": validation_issues or "None",
+                    "Risks": risks or "None",
+                    "Security Flags": security_flags or "None",
                     "Summary": summary,
                 })
+
+                if documents:
+                    st.subheader("Document details")
+                    for document in documents:
+                        with st.expander(f"{document.get('document_id')} - {document.get('file_name')}"):
+                            st.write({
+                                "Document ID": document.get("document_id"),
+                                "Type": document.get("document_type"),
+                                "File Name": document.get("file_name"),
+                                "Confidence": document.get("confidence"),
+                                "Injection Detected": document.get("injection_detected"),
+                                "Extracted Text": document.get("extracted_text") or document.get("text") or "",
+                            })
+
+                reviewer = st.text_input("Reviewer", value="Ops Reviewer", key=f"manual_review_reviewer_{case_id}")
+                action = st.selectbox(
+                    "Action",
+                    ["continue_processing", "reprocess_documents", "request_documents", "hold_case"],
+                    key=f"manual_review_action_{case_id}",
+                )
+                rationale = st.text_area("Rationale", key=f"manual_review_rationale_{case_id}")
+
+                if st.button("Submit Manual Review", key=f"submit_manual_review_{case_id}"):
+                    if not rationale.strip():
+                        st.error("Rationale is required for Manual Review.")
+                    else:
+                        try:
+                            result = _resume_manual_review(case_id, {
+                                "action": action,
+                                "reviewer": reviewer,
+                                "rationale": rationale,
+                                "missing_documents": ["supporting_document"] if action == "request_documents" else [],
+                            })
+                            record_audit(case_id, reviewer, "manual_review_resolved", {
+                                "action": action,
+                                "rationale": rationale,
+                            })
+                            st.session_state.workflow_result = result
+                            st.success("Manual review submitted.")
+                            st.write(result.get("status") or "Manual review response recorded.")
+                        except Exception as exc:
+                            st.error(f"Unable to resume manual review workflow: {exc}")
 
 elif page == "Human Review":
     st.header("Human Review")
@@ -610,21 +1093,42 @@ elif page == "Human Review":
 
             decision = st.selectbox("Decision", ["approved", "rejected", "request_more_information"], key="human_decision_selector")
             rationale = st.text_area("Decision Rationale", key="human_decision_rationale")
+            requested_documents = st.text_area(
+                "Requested Documents / Information",
+                help="List any supporting documents or clarifications required before the claim can be finalized.",
+                key="human_requested_documents",
+                placeholder="itemized_bill\ntreatment_proof\nclaimant_id",
+            ) if decision == "request_more_information" else ""
 
             if st.button("Submit Human Decision", type="primary", disabled=not validation["valid"]):
                 if not rationale.strip():
                     st.error("Please provide a rationale before continuing.")
+                elif decision == "request_more_information" and not requested_documents.strip():
+                    st.error("Please list at least one requested document or clarification.")
                 else:
+                    payload = {
+                        "decision": decision,
+                        "rationale": rationale,
+                        "reviewer": reviewer,
+                    }
+                    if decision == "request_more_information":
+                        parsed_documents = [
+                            item.strip()
+                            for item in requested_documents.replace(";", "\n").splitlines()
+                            if item.strip()
+                        ]
+                        payload["missing_documents"] = parsed_documents
+                        payload["requested_documents"] = parsed_documents
                     try:
-                        result = _resume_human_review(chosen_case, {
-                            "decision": decision,
-                            "rationale": rationale,
-                            "reviewer": reviewer,
-                        })
-                        record_audit(chosen_case, reviewer, "human_decision_recorded", {"decision": decision, "rationale": rationale})
+                        result = _resume_human_review(chosen_case, payload)
+                        record_audit(chosen_case, reviewer, "human_decision_recorded", {"decision": decision, "rationale": rationale, "missing_documents": payload.get("missing_documents", [])})
                         st.session_state.workflow_result = result
-                        st.success("Human review submitted.")
-                        st.write(result.get("final_result", ""))
+                        if decision == "request_more_information":
+                            st.info("Additional information requested. The claim remains open and is not finalized.")
+                            st.write(result.get("status") or "awaiting_documents")
+                        else:
+                            st.success("Human review submitted.")
+                            st.write(result.get("final_result", ""))
                     except Exception as exc:
                         st.error(f"Unable to resume workflow: {exc}")
 
@@ -646,37 +1150,48 @@ elif page == "Notifications":
 
 elif page == "Audit":
     st.header("Audit History")
+    case_filter = st.text_input("Filter by Case ID", key="audit_case_filter")
+    action_filter = st.selectbox("Filter by Action", ["All", "claim_registered", "workflow_started", "mcp_validation_completed", "intake_completed", "document_persisted", "document_validation_completed", "documents_requested", "workflow_paused_for_documents", "manual_review_started", "manual_review_resolved", "summary_created", "case_routed", "approval_requested", "sla_scheduled", "notification_sent", "human_review_started", "additional_information_requested", "human_decision_recorded", "claim_finalized"], index=0)
+    sort_order = st.radio("Sort order", ["Newest first", "Oldest first"], horizontal=True)
+
+    query = """
+        SELECT
+            id,
+            case_id,
+            actor,
+            action,
+            details,
+            created_at
+        FROM public.claim_audit
+        WHERE (%s = '' OR case_id ILIKE %s)
+    """
+    params: list[Any] = [case_filter or "", f"%{case_filter or ''}%"]
+    if action_filter != "All":
+        query += " AND action = %s "
+        params.append(action_filter)
+    query += " ORDER BY created_at " + ("DESC" if sort_order == "Newest first" else "ASC") + " LIMIT 200"
+
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    id,
-                    case_id,
-                    actor,
-                    action,
-                    details,
-                    created_at
-                FROM public.claim_audit
-                ORDER BY created_at DESC
-                LIMIT 100
-                """
-            )
+            cur.execute(query, params)
             rows = cur.fetchall()
 
     if not rows:
-        st.info("No audit records found.")
+        st.info("No audit records found for the selected filters.")
     else:
         for row in rows:
             audit_id, case_id, actor, action, details, created_at = row
-            with st.expander(f"{case_id} - {action}"):
+            safe_details = details or {}
+            if isinstance(safe_details, dict):
+                safe_details = {k: v for k, v in safe_details.items() if k != "_audit_key"}
+            with st.expander(f"{case_id} - {action} - {created_at}"):
                 st.write({
                     "Audit ID": audit_id,
                     "Case ID": case_id,
                     "Actor": actor,
                     "Action": action,
                     "Timestamp": created_at,
-                    "Details": details,
+                    "Details": safe_details,
                 })
 
 

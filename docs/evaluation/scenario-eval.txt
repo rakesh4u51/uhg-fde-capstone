@@ -1,0 +1,10 @@
+PYTHONPATH=. python evaluation/scenario_eval.py
+Exit code: 1
+
+Observed failures include route/status mismatches in the broad evaluation gate:
+- CLEAN-CLAIM: expected awaiting_human_review, actual finalized/completed.
+- MISSING-DOC: route expected missing-document handling but actual result diverged to manual_review_held.
+- multiple risk scenarios were not matched to the expected manual-review path.
+- human approval and checkpoint-resume scenarios remain mismatched in the evaluation set.
+
+This is recorded as evidence of not release-ready status.
