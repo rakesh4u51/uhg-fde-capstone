@@ -68,21 +68,64 @@ st.markdown(
         }
 
         .stRadio > div {
-            gap: 0.6rem;
+            gap: 0.9rem;
+        }
+
+        [role="radiogroup"] {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            padding-top: 0.4rem;
         }
 
         [role="radiogroup"] > label {
             background: rgba(255, 255, 255, 0.04) !important;
             border: 1px solid rgba(255, 255, 255, 0.15);
             border-radius: 12px;
-            padding: 0.82rem 0.9rem;
-            margin: 0.2rem 0;
+            padding: 0.78rem 0.85rem 0.78rem 2.7rem;
+            margin: 0;
             transition: all 0.2s ease;
             color: #ffffff !important;
             font-weight: 700;
             letter-spacing: 0.01em;
             opacity: 1;
             box-shadow: none;
+            position: relative;
+            overflow: visible;
+        }
+
+        [role="radiogroup"] > label::before {
+            content: "";
+            position: absolute;
+            left: 0.9rem;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 0.72rem;
+            height: 0.72rem;
+            border-radius: 50%;
+            background: rgba(148, 163, 184, 0.7);
+            box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
+        }
+
+        [role="radiogroup"] > label[data-checked="true"]::before {
+            background: linear-gradient(135deg, #7dd3fc 0%, #60a5fa 100%);
+            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18), 0 0 12px rgba(125, 211, 252, 0.45);
+        }
+
+        [role="radiogroup"] > label::after {
+            content: "";
+            position: absolute;
+            left: 1.25rem;
+            top: calc(100% + 0.14rem);
+            width: calc(100% - 2.5rem);
+            height: 2px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, rgba(125,211,252,0.8), rgba(96,165,250,0.18));
+            opacity: 0.8;
+        }
+
+        [role="radiogroup"] > label:last-child::after {
+            display: none;
         }
 
         [role="radiogroup"] > label > div,
@@ -241,6 +284,44 @@ def _canonical_case_status(status: Any) -> str:
         "documents_waiting": "awaiting_documents",
     }
     return aliases.get(value, value)
+
+
+def _workflow_stage_steps() -> list[str]:
+    return [
+        "submitted",
+        "documents_processing",
+        "awaiting_documents",
+        "manual_review",
+        "awaiting_human_review",
+        "human_review",
+        "completed",
+    ]
+
+
+def _workflow_stage_index(status: Any) -> int:
+    normalized = _canonical_case_status(status)
+    order = {stage: idx for idx, stage in enumerate(_workflow_stage_steps())}
+    return order.get(normalized, 0)
+
+
+def _render_workflow_status_bar(status: Any, *, label: str = "Workflow status") -> None:
+    normalized = _canonical_case_status(status)
+    steps = _workflow_stage_steps()
+    current = _workflow_stage_index(normalized)
+    total = max(len(steps) - 1, 1)
+    progress = min(max(current / total, 0.0), 1.0)
+    stage_name = {
+        "submitted": "Submitted",
+        "documents_processing": "Document Intake",
+        "awaiting_documents": "Awaiting Documents",
+        "manual_review": "Manual Review",
+        "awaiting_human_review": "Awaiting Human Review",
+        "human_review": "Human Review",
+        "completed": "Completed",
+    }.get(normalized, normalized or "Unknown")
+
+    st.caption(f"{label}: {stage_name}")
+    st.progress(progress, text=f"{stage_name} ({current}/{len(steps)-1})")
 
 
 def _queue_cases() -> list[dict[str, Any]]:
@@ -782,25 +863,24 @@ st.markdown(
     <div style="
         background: linear-gradient(135deg, rgba(37,99,235,0.12), rgba(14,165,233,0.06));
         border: 1px solid rgba(37,99,235,0.14);
-        border-radius: 20px;
-        padding: 1.3rem 1.5rem;
-        margin-bottom: 1.25rem;
-        box-shadow: 0 14px 30px rgba(37,99,235,0.08);
+        border-radius: 16px;
+        padding: 0.7rem 0.9rem;
+        margin: 0 0 0.7rem 0;
+        box-shadow: 0 10px 22px rgba(37,99,235,0.06);
     ">
-        <div style="font-size: 0.82rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #2563eb; margin-bottom: 0.45rem;">
+        <div style="font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #2563eb; margin-bottom: 0.25rem;">
             Claims Operations Console
         </div>
-        <div style="font-size: 2.25rem; font-weight: 800; color: #0f172a; line-height: 1.1;">
+        <div style="font-size: 1.3rem; font-weight: 800; color: #0f172a; line-height: 1.15;">
             Intelligent Claims Processing
         </div>
-        <div style="margin-top: 0.45rem; color: #475569; font-size: 1rem;">
+        <div style="margin-top: 0.18rem; color: #475569; font-size: 0.78rem; line-height: 1.3;">
             AI-assisted claims processing with human-in-the-loop controls
         </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
-st.divider()
 _initialize_workflow_thread_table()
 if page == "Submit Claim":
     st.header("Submit Claim")
@@ -882,6 +962,8 @@ elif page == "Case Workspace":
                 st.metric("Status", canonical_status)
             with col3:
                 st.metric("Stage", canonical_status or "unknown")
+
+            _render_workflow_status_bar(canonical_status, label="Case workflow")
 
             st.subheader("Claim Information")
             st.write({
@@ -1072,6 +1154,7 @@ elif page == "Human Review":
             st.warning("Case not found.")
         else:
             st.subheader(f"Case {chosen_case}")
+            _render_workflow_status_bar(case.get("status"), label="Human Review workflow")
             st.write({
                 "Claimant": case.get("claimant_name"),
                 "Claim Type": case.get("claim_type"),

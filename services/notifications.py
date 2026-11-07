@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from typing import Any, Callable
 
@@ -128,10 +129,11 @@ def schedule_case_follow_up(
         if callback:
             callback(case_id)
 
+    run_at = datetime.now() + timedelta(hours=max(float(delay_hours), 0.01))
     scheduler.add_job(
         _job,
-        "interval",
-        hours=max(delay_hours, 0.01),
+        "date",
+        run_date=run_at,
         id=f"{job_name}-{case_id}",
         replace_existing=True,
     )

@@ -710,7 +710,6 @@ def sla_node(state: ClaimState):
         },
         stage="sla_complete",
     )
-    notify_sla_escalation(state["case_id"], "claims-ops@uhg.local", delay_hours=24.0)
     schedule_case_follow_up(
         state["case_id"],
         delay_hours=24.0,
