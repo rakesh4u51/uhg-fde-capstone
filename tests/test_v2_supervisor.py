@@ -69,6 +69,59 @@ def test_resume_existing_case_document_reuses_thread(monkeypatch):
     assert result["current_stage"] == "documents_revalidated"
 
 
+def test_resume_existing_case_document_allows_processing_state(monkeypatch):
+    class FakeGraph:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aget_state(self, config):
+            return SimpleNamespace(
+                values={
+                    "case_id": "CASE-RESUME-PROCESSING",
+                    "current_stage": "documents_processing",
+                    "status": "documents_processing",
+                    "claim_data": {"case_id": "CASE-RESUME-PROCESSING"},
+                }
+            )
+
+        async def ainvoke(self, command, config):
+            assert config["configurable"]["thread_id"] == "CASE-RESUME-PROCESSING-THREAD"
+            assert command.resume["document_type"] == "medical_bill"
+            return {"status": "documents_revalidated", "current_stage": "documents_revalidated"}
+
+    monkeypatch.setattr(streamlit_app, "_get_thread_id", lambda case_id, create_if_missing=False: "CASE-RESUME-PROCESSING-THREAD")
+    monkeypatch.setattr(
+        streamlit_app,
+        "process_document",
+        lambda path: SimpleNamespace(
+            extracted_text="Replacement evidence accepted",
+            document_type="medical_bill",
+            confidence=0.91,
+            injection_detected=False,
+        ),
+    )
+    monkeypatch.setattr(
+        streamlit_app,
+        "save_document_result",
+        lambda case_id, path, document_id=None, result=None: {
+            "document_id": document_id,
+            "extracted_text": result.extracted_text,
+            "document_type": result.document_type,
+            "confidence": result.confidence,
+        },
+    )
+    monkeypatch.setattr(streamlit_app, "get_v2_graph", lambda: FakeGraph())
+
+    uploaded = SimpleNamespace(name="resume_document.pdf", getvalue=lambda: b"demo")
+    result = streamlit_app._resume_existing_case_documents("CASE-RESUME-PROCESSING", [uploaded])
+
+    assert result["status"] == "documents_revalidated"
+    assert result["current_stage"] == "documents_revalidated"
+
+
 def test_human_review_requires_explicit_decision_before_finalization(monkeypatch):
     monkeypatch.setattr(
         workflow,
@@ -105,6 +158,26 @@ def test_await_documents_resume_targets_latest_document_id(monkeypatch):
 
     assert isinstance(result, Command)
     assert result.update["document_ids"] == ["DOC-NEW"]
+    assert result.update["status"] == "documents_revalidated"
+    assert result.update["current_stage"] == "documents_revalidated"
+
+
+def test_await_documents_resume_continues_when_uploaded_document_has_blank_text(monkeypatch):
+    monkeypatch.setattr(workflow, "interrupt", lambda payload: {"document_id": "DOC-BLANK", "document_text": "", "document_type": "supporting_document", "document_confidence": 0.0})
+    state = {
+        "case_id": "CASE-REVALIDATE-BLANK-TEXT",
+        "claim_data": {"claim_type": "Medical", "claim_amount": 25000.0},
+        "current_stage": "awaiting_documents",
+        "status": "awaiting_documents",
+        "missing_documents": ["medical_bill"],
+        "document_ids": ["DOC-OLD"],
+    }
+
+    result = workflow.await_documents_node(state)
+
+    assert isinstance(result, Command)
+    assert result.goto == "documents"
+    assert result.update["document_ids"] == ["DOC-BLANK"]
     assert result.update["status"] == "documents_revalidated"
     assert result.update["current_stage"] == "documents_revalidated"
 
@@ -229,6 +302,32 @@ def test_missing_medical_bill_routes_to_await_documents():
     assert result["missing_documents"] == ["medical_bill"]
     assert result["document_complete"] is False
     assert result["document_validation"]["continue_allowed"] is False
+
+
+def test_processed_unknown_document_type_does_not_keep_case_awaiting_documents():
+    state = {
+        "case_id": "CASE-UNKNOWN-DOC-TYPE",
+        "claim_data": {"claim_type": "Medical", "claim_amount": 25000.0},
+        "document_ids": ["DOC-UNKNOWN"],
+        "document_results": [
+            {
+                "document_id": "DOC-UNKNOWN",
+                "document_type": "unknown",
+                "confidence": 0.91,
+                "complete": True,
+                "processing_complete": True,
+                "risks": [],
+                "security_flags": [],
+                "validation_issues": [],
+            }
+        ],
+    }
+
+    result = workflow.document_aggregation_node(state)
+
+    assert result["missing_documents"] == []
+    assert result["document_complete"] is True
+    assert result["document_validation"]["continue_allowed"] is True
 
 
 def test_low_confidence_document_requires_manual_review():

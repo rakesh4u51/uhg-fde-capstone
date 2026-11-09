@@ -1,13 +1,16 @@
 import asyncio
 import os
+import re
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import streamlit as st
 from dotenv import load_dotenv
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 from psycopg.rows import dict_row
 
@@ -34,193 +37,220 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        * {
-            font-family: "Segoe UI", "Inter", sans-serif;
+        :root {
+            --bg: #f8fafc;
+            --panel: rgba(255,255,255,0.86);
+            --panel-border: rgba(148,163,184,0.18);
+            --text: #0f172a;
+            --muted: #475569;
+            --blue: #2563eb;
+            --green: #16a34a;
+            --amber: #d97706;
+            --red: #dc2626;
+            --purple: #7c3aed;
+            --gray: #64748b;
         }
 
-        .stApp {
-            background: linear-gradient(135deg, #f8fafc 0%, #edf6ff 38%, #f3f4f6 100%);
-            color: #0f172a;
+        * { font-family: "Segoe UI", "Inter", sans-serif; }
+        .stApp { background: var(--bg); color: var(--text); }
+        .block-container,
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 1.1rem !important;
+            padding-bottom: 1rem !important;
+            padding-left: 1.4rem !important;
+            padding-right: 1.4rem !important;
+            max-width: 1500px;
+            overflow: visible !important;
         }
-
-        .block-container {
-            padding-top: 2rem;
-            padding-bottom: 3rem;
-            max-width: 1460px;
-        }
-
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #0b1220 0%, #101827 100%);
-            color: #ffffff;
-            border-right: 1px solid rgba(148, 163, 184, 0.22);
+            background: #111827;
+            color: #fff;
+            border-right: 1px solid rgba(148,163,184,0.24);
         }
-
         [data-testid="stSidebar"] .stMarkdown,
-        [data-testid="stSidebar"] .stRadio,
-        [data-testid="stSidebar"] .stSelectbox,
-        [data-testid="stSidebar"] .stTextInput,
-        [data-testid="stSidebar"] label,
         [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] div,
-        [data-testid="stSidebar"] span {
-            color: #ffffff !important;
-            opacity: 1;
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stRadio {
+            color: #fff !important;
         }
-
-        .stRadio > div {
-            gap: 0.9rem;
-        }
-
+        [data-testid="stSidebar"] .stRadio > div { gap: 0.5rem; }
         [role="radiogroup"] {
             display: flex;
             flex-direction: column;
-            gap: 0.75rem;
-            padding-top: 0.4rem;
+            gap: 0.55rem;
+            padding-top: 0.15rem;
         }
-
         [role="radiogroup"] > label {
-            background: rgba(255, 255, 255, 0.04) !important;
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            border-radius: 12px;
-            padding: 0.78rem 0.85rem 0.78rem 2.7rem;
+            background: rgba(255,255,255,0.04) !important;
+            border: 1px solid rgba(148,163,184,0.14);
+            border-radius: 10px;
+            padding: 0.55rem 0.7rem;
             margin: 0;
-            transition: all 0.2s ease;
-            color: #ffffff !important;
+            color: #fff !important;
+            font-weight: 600;
+        }
+        [role="radiogroup"] > label[data-checked="true"] {
+            background: rgba(37,99,235,0.16) !important;
+            border-color: rgba(96,165,250,0.7);
+            box-shadow: 0 0 0 1px rgba(96,165,250,0.2);
+        }
+        h1, h2, h3, h4 {
+            color: var(--text);
+            letter-spacing: -0.03em;
+            margin-top: 0;
+            margin-bottom: 0.25rem;
+            line-height: 1.25;
+        }
+        h1 { font-size: 1.85rem; }
+        h2 { font-size: 1.55rem; }
+        h3 { font-size: 1.1rem; }
+        p, div, label, span { font-size: 0.92rem; }
+        .stMetric {
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            border-radius: 12px;
+            box-shadow: 0 8px 18px rgba(15,23,42,0.03);
+            padding: 0.35rem 0.6rem;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 1.45rem;
             font-weight: 700;
-            letter-spacing: 0.01em;
-            opacity: 1;
+        }
+        .compact-header {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid rgba(148,163,184,0.08);
+            border-radius: 10px;
+            padding: 0.55rem 0.6rem 0.4rem 0.6rem;
+            margin: 0 0 0.45rem 0;
             box-shadow: none;
-            position: relative;
+        }
+        .compact-header .title {
+            font-size: 0.96rem;
+            font-weight: 700;
+            color: #ffffff;
+            line-height: 1.15;
+            letter-spacing: -0.02em;
+        }
+        .compact-header .subtitle {
+            margin-top: 0.16rem;
+            color: rgba(255,255,255,0.72);
+            font-size: 0.64rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .page-header {
+            margin: 0 0 0.8rem 0;
+            padding: 0;
             overflow: visible;
         }
-
-        [role="radiogroup"] > label::before {
-            content: "";
-            position: absolute;
-            left: 0.9rem;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 0.72rem;
-            height: 0.72rem;
-            border-radius: 50%;
-            background: rgba(148, 163, 184, 0.7);
-            box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
-        }
-
-        [role="radiogroup"] > label[data-checked="true"]::before {
-            background: linear-gradient(135deg, #7dd3fc 0%, #60a5fa 100%);
-            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18), 0 0 12px rgba(125, 211, 252, 0.45);
-        }
-
-        [role="radiogroup"] > label::after {
-            content: "";
-            position: absolute;
-            left: 1.25rem;
-            top: calc(100% + 0.14rem);
-            width: calc(100% - 2.5rem);
-            height: 2px;
-            border-radius: 999px;
-            background: linear-gradient(90deg, rgba(125,211,252,0.8), rgba(96,165,250,0.18));
-            opacity: 0.8;
-        }
-
-        [role="radiogroup"] > label:last-child::after {
-            display: none;
-        }
-
-        [role="radiogroup"] > label > div,
-        [role="radiogroup"] > label > span,
-        [role="radiogroup"] > label p,
-        [role="radiogroup"] > label div {
-            color: #ffffff !important;
-            font-weight: 700;
-            opacity: 1;
-        }
-
-        [role="radiogroup"] > label:hover {
-            background: rgba(255, 255, 255, 0.07) !important;
-            border-color: rgba(255, 255, 255, 0.25);
-        }
-
-        [role="radiogroup"] > label[data-checked="true"] {
-            background: rgba(255, 255, 255, 0.08) !important;
-            border-color: rgba(255, 255, 255, 0.82);
-            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
-        }
-
-        [role="radiogroup"] input[type="radio"] {
-            accent-color: #f8fafc;
-            transform: scale(1.08);
-        }
-
-        h1, h2, h3, h4 {
-            color: #0f172a;
+        .page-header h2 {
+            margin: 0;
+            padding: 0;
+            font-size: 1.55rem;
+            line-height: 1.25;
             letter-spacing: -0.03em;
+            overflow: visible;
+            display: block;
         }
-
-        .stMetric {
-            background: rgba(255, 255, 255, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.15);
-            border-radius: 16px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
-            padding: 0.75rem 1rem;
+        .page-header .subtitle {
+            margin-top: 0.3rem;
+            margin-bottom: 0;
+            color: var(--muted);
+            font-size: 0.78rem;
+            line-height: 1.4;
+            overflow: visible;
         }
-
-        [data-testid="stMetricValue"] {
-            color: #0f172a;
-            font-size: 1.8rem;
-            font-weight: 700;
+        .workflow-track {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            align-items: center;
+            padding: 0.45rem 0.2rem 0.1rem;
         }
-
-        .stDataFrame {
-            border-radius: 16px;
-            overflow: hidden;
-            border: 1px solid rgba(148, 163, 184, 0.16);
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+        .workflow-step {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.38rem 0.62rem;
+            border-radius: 999px;
+            border: 1px solid #dfe7f1;
+            background: #f8fafc;
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 600;
+            white-space: nowrap;
         }
-
-        div[data-testid="stExpander"] > div {
-            background: rgba(255, 255, 255, 0.7);
-            border: 1px solid rgba(148, 163, 184, 0.16);
+        .workflow-step.complete { background: rgba(22,163,74,0.1); border-color: rgba(22,163,74,0.25); color: #166534; }
+        .workflow-step.current { background: rgba(37,99,235,0.1); border-color: rgba(37,99,235,0.28); color: #1d4ed8; }
+        .workflow-step.pending { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
+        .workflow-step.exception { background: rgba(220,38,38,0.08); border-color: rgba(220,38,38,0.2); color: #b91c1c; }
+        .workflow-arrow {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin: 0 0.1rem 0 -0.1rem;
+        }
+        .panel-box {
+            background: rgba(255,255,255,0.85);
+            border: 1px solid var(--panel-border);
             border-radius: 12px;
-            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+            padding: 0.7rem 0.8rem;
+            margin-bottom: 0.75rem;
         }
-
+        .status-card {
+            background: rgba(37,99,235,0.05);
+            border: 1px solid rgba(37,99,235,0.18);
+            border-radius: 12px;
+            padding: 0.7rem 0.8rem;
+            margin-bottom: 0.7rem;
+        }
+        .status-card .title { font-size: 0.82rem; font-weight: 700; color: var(--blue); letter-spacing: 0.08em; text-transform: uppercase; }
+        .status-item { font-size: 0.88rem; margin: 0.18rem 0; }
+        .status-item.done { color: var(--green); }
+        .status-item.active { color: var(--blue); font-weight: 600; }
+        .status-item.pending { color: var(--gray); }
+        .status-item.exception { color: var(--red); font-weight: 600; }
+        .stDataFrame { border-radius: 12px; overflow: hidden; }
+        div[data-testid="stExpander"] > div { border-radius: 10px; }
         .stButton > button {
             background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
             color: white;
             border: none;
             border-radius: 10px;
-            padding: 0.65rem 1.05rem;
+            padding: 0.58rem 0.9rem;
             font-weight: 600;
-            box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22);
         }
-
-        .stButton > button:hover {
-            filter: brightness(1.04);
-            box-shadow: 0 12px 24px rgba(37, 99, 235, 0.28);
-        }
-
-        .stAlert {
-            border-radius: 12px;
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            background: rgba(255, 255, 255, 0.72);
-        }
-
-        .stForm {
-            background: rgba(255, 255, 255, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.16);
-            border-radius: 18px;
-            padding: 1rem 1.05rem;
-            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.04);
-        }
-
+        .stButton > button:hover { filter: brightness(1.04); }
+        .stForm, .stAlert { border-radius: 12px; }
         .stTextInput input, .stSelectbox select, .stNumberInput input, .stTextArea textarea {
             border-radius: 10px !important;
-            border: 1px solid rgba(148, 163, 184, 0.3) !important;
-            background: rgba(255, 255, 255, 0.82) !important;
+            border: 1px solid rgba(148,163,184,0.28) !important;
+            min-height: 2rem !important;
+            padding: 0.35rem 0.55rem !important;
         }
+        .stTextArea textarea { min-height: 3rem !important; }
+        .section-label {
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-bottom: 0.3rem;
+        }
+        .compact-list p { margin: 0.18rem 0; }
     </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.sidebar.markdown(
+    """
+    <div class="compact-header">
+        <div class="title">Intelligent Claims</div>
+        <div class="title">Processing</div>
+        <div class="subtitle">Claims Operations</div>
+    </div>
     """,
     unsafe_allow_html=True,
 )
@@ -243,6 +273,163 @@ if page == "Manual Review Queue":
     page = "Manual Review"
 elif page == "Human Review Queue":
     page = "Human Review"
+
+
+def format_status(value: Any) -> str:
+    status = _canonical_case_status(value)
+    labels = {
+        "submitted": "Submitted",
+        "processing": "Processing",
+        "validated": "Validated",
+        "intake": "Intake",
+        "documents_processing": "Processing Documents",
+        "awaiting_documents": "Awaiting Documents",
+        "documents_revalidated": "Documents Revalidated",
+        "manual_review": "Manual Review",
+        "manual_review_held": "Manual Review",
+        "awaiting_human_review": "Human Review",
+        "human_review": "Human Review",
+        "human_decision_received": "Human Review",
+        "completed": "Completed",
+        "rejected": "Rejected",
+        "hold": "On Hold",
+    }
+    if status in labels:
+        return labels[status]
+    return status.replace("_", " ").title() if status else "Unknown"
+
+
+def format_currency(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number == 0:
+        return "₹0"
+    return f"₹{number:,.0f}"
+
+
+def render_page_header(title: str, subtitle: str | None = None) -> None:
+    st.markdown(
+        """
+        <div class="page-header">
+            <h2>{title}</h2>
+            {subtitle_html}
+        </div>
+        """.format(
+            title=title,
+            subtitle_html=f'<div class="subtitle">{subtitle}</div>' if subtitle else "",
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _status_display_label(status: Any) -> str:
+    return format_status(status)
+
+
+def _render_processing_status(step_index: int = 0) -> None:
+    steps = [
+        "Validating claim",
+        "Running Intake",
+        "Processing Documents",
+        "Creating Summary",
+        "Routing Claim",
+        "Setting SLA",
+        "Human Review",
+    ]
+    html = """
+    <div class="status-card">
+        <div class="title">Processing Claim</div>
+    """
+    for idx, label in enumerate(steps):
+        if idx < step_index:
+            css_class = "done status-item"
+            icon = "✓"
+        elif idx == step_index:
+            css_class = "active status-item"
+            icon = "●"
+        else:
+            css_class = "pending status-item"
+            icon = "○"
+        html += f'<div class="{css_class}">{icon} {label}</div>'
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _render_workflow_progress(status: Any, *, label: str = "Workflow Progress") -> None:
+    normalized = _canonical_case_status(status)
+    steps = [
+        {"key": "submitted", "label": "Submitted"},
+        {"key": "validation", "label": "Validation"},
+        {"key": "intake", "label": "Intake"},
+        {"key": "documents", "label": "Documents"},
+        {"key": "summary", "label": "Summary"},
+        {"key": "routing", "label": "Routing"},
+        {"key": "sla", "label": "SLA"},
+        {"key": "human_review", "label": "Human Review"},
+        {"key": "completed", "label": "Completed"},
+    ]
+    stage_positions = {
+        "submitted": 0,
+        "processing": 0,
+        "intake": 2,
+        "documents_processing": 3,
+        "awaiting_documents": 3,
+        "documents_revalidated": 3,
+        "manual_review": 3,
+        "manual_review_held": 3,
+        "summary": 4,
+        "routing": 5,
+        "sla": 6,
+        "awaiting_human_review": 7,
+        "human_review": 7,
+        "human_decision_received": 7,
+        "completed": 8,
+    }
+    current_index = stage_positions.get(normalized, 0)
+    if normalized in {"error", "rejected"}:
+        current_index = 0
+    html = f'<div class="section-label">{label}</div><div class="workflow-track">'
+    for idx, step in enumerate(steps):
+        if normalized in {"error", "rejected"}:
+            css_class = "workflow-step exception"
+        elif idx < current_index:
+            css_class = "workflow-step complete"
+        elif idx == current_index:
+            css_class = "workflow-step current"
+        else:
+            css_class = "workflow-step pending"
+        if idx < len(steps) - 1:
+            html += f'<div class="{css_class}">● {step["label"]}</div><div class="workflow-arrow">→</div>'
+        else:
+            html += f'<div class="{css_class}">● {step["label"]}</div>'
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _safe_error_details(exc: Exception) -> str:
+    raw = str(exc or "")
+    if not raw.strip():
+        return "Workflow error details unavailable."
+    redacted = raw
+    patterns = [
+        r"(?i)(DATABASE_URL|password|api[_-]?key|secret|token)=([^\s,;]+)",
+        r"(?i)(DATABASE_URL|password|api[_-]?key|secret|token)\s*[:=]\s*([^\s,;]+)",
+    ]
+    for pattern in patterns:
+        redacted = re.sub(pattern, r"\1=[REDACTED]", redacted)
+    return redacted
+
+
+def _display_value(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, Decimal):
+        return f"{float(value):,.2f}"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{float(value):,.2f}"
+    return str(value)
 
 
 def _case_record(case_id: str) -> dict[str, Any] | None:
@@ -376,7 +563,7 @@ def _resume_existing_case_documents(case_id: str, uploaded_files) -> dict[str, A
     if not uploaded_files:
         raise ValueError("At least one document is required before resuming the case workflow.")
 
-    thread_id = _get_thread_id(case_id, create_if_missing=False)
+    thread_id = _recover_thread_id_for_case(case_id)
     if not thread_id:
         raise ValueError(f"No persisted workflow execution was found for case {case_id}.")
 
@@ -416,8 +603,20 @@ def _resume_existing_case_documents(case_id: str, uploaded_files) -> dict[str, A
                 raise ValueError("The persisted LangGraph checkpoint does not contain claim_data.")
             current_stage = state_values.get("current_stage")
             current_status = _canonical_case_status(state_values.get("status"))
-            allowed_stages = {"awaiting_documents", "documents_revalidated", "manual_review", "manual_review_held"}
-            allowed_statuses = {"awaiting_documents", "manual_review", "manual_review_held", "documents_revalidated"}
+            allowed_stages = {
+                "awaiting_documents",
+                "documents_processing",
+                "documents_revalidated",
+                "manual_review",
+                "manual_review_held",
+            }
+            allowed_statuses = {
+                "awaiting_documents",
+                "documents_processing",
+                "manual_review",
+                "manual_review_held",
+                "documents_revalidated",
+            }
             if current_stage not in allowed_stages and current_status not in allowed_statuses:
                 raise ValueError(
                     "The case is not currently paused for document resubmission. "
@@ -651,14 +850,76 @@ def _get_thread_id(
     return thread_id
 
 
+def _recover_thread_id_for_case(case_id: str) -> str | None:
+    existing = _get_thread_id(case_id, create_if_missing=False)
+    if existing:
+        return existing
+
+    async def _scan() -> str | None:
+        async with AsyncPostgresSaver.from_conn_string(DATABASE_URL) as saver:
+            candidates: list[dict[str, Any]] = []
+            async for checkpoint_tuple in saver.alist(None, limit=500):
+                config = checkpoint_tuple.config or {}
+                checkpoint = checkpoint_tuple.checkpoint or {}
+                channel_values = checkpoint.get("channel_values") or {}
+                if channel_values.get("case_id") != case_id:
+                    continue
+                thread_id = (config.get("configurable") or {}).get("thread_id")
+                if not thread_id:
+                    continue
+                if "claim_data" not in channel_values:
+                    continue
+                state_status = _canonical_case_status(channel_values.get("status"))
+                state_stage = _canonical_case_status(channel_values.get("current_stage"))
+                pause_states = {
+                    "awaiting_documents",
+                    "documents_revalidated",
+                    "manual_review",
+                    "manual_review_held",
+                    "awaiting_human_review",
+                    "human_review",
+                    "approval_requested",
+                    "sla_complete",
+                }
+                priority = 1
+                if state_status in pause_states or state_stage in pause_states:
+                    priority = 2
+                candidates.append({
+                    "thread_id": thread_id,
+                    "status": state_status,
+                    "stage": state_stage,
+                    "priority": priority,
+                })
+
+            if not candidates:
+                print(f"[Workflow Recovery] No resumable checkpoints found for case {case_id}.")
+                return None
+
+            best_index = 0
+            for idx in range(1, len(candidates)):
+                candidate = candidates[idx]
+                best_candidate = candidates[best_index]
+                if candidate["priority"] > best_candidate["priority"]:
+                    best_index = idx
+                elif candidate["priority"] == best_candidate["priority"] and idx > best_index:
+                    best_index = idx
+
+            best = candidates[best_index]
+            print(f"[Workflow Recovery] case_id={case_id} candidates={candidates} selected_thread={best['thread_id']}")
+            return best["thread_id"]
+
+    thread_id = asyncio.run(_scan())
+    if thread_id:
+        _save_thread_id(case_id, thread_id)
+        return thread_id
+    return None
+
+
 def _resume_manual_review(
     case_id: str,
     manual_input: dict[str, Any],
 ) -> dict[str, Any]:
-    thread_id = _get_thread_id(
-        case_id,
-        create_if_missing=False,
-    )
+    thread_id = _recover_thread_id_for_case(case_id)
 
     if not thread_id:
         raise ValueError(
@@ -674,21 +935,47 @@ def _resume_manual_review(
             config = {"configurable": {"thread_id": thread_id}}
             snapshot = await graph.aget_state(config)
             state_values = snapshot.values if snapshot else {}
+            current_stage = state_values.get("current_stage")
+            current_status = _canonical_case_status(state_values.get("status"))
+            print("[Manual Review] checkpoint_stage:", current_stage)
+            print("[Manual Review] checkpoint_status:", current_status)
 
             if not state_values:
                 raise ValueError(f"No LangGraph checkpoint exists for thread {thread_id}.")
             if "claim_data" not in state_values:
                 raise ValueError("The persisted LangGraph checkpoint does not contain claim_data.")
 
-            current_stage = state_values.get("current_stage")
-            current_status = state_values.get("status")
-            allowed_stages = {"manual_review", "manual_review_held", "documents_revalidated", "awaiting_documents"}
-            allowed_statuses = {"manual_review", "manual_review_held", "awaiting_documents"}
+            with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM public.claims WHERE case_id = %s",
+                        (case_id,),
+                    )
+                    row = cur.fetchone()
+            db_status = _canonical_case_status((row or {}).get("status")) if row else ""
+            print("[Manual Review] database_status:", db_status)
 
-            if current_stage not in allowed_stages and current_status not in allowed_statuses:
+            allowed_stages = {
+                "manual_review",
+                "manual_review_held",
+                "documents_processing",
+                "documents_revalidated",
+                "awaiting_documents",
+                "documents_complete",
+            }
+            allowed_statuses = {
+                "manual_review",
+                "manual_review_held",
+                "documents_processing",
+                "awaiting_documents",
+                "documents_revalidated",
+                "documents_complete",
+            }
+
+            if current_stage not in allowed_stages and current_status not in allowed_statuses and db_status not in allowed_statuses:
                 raise ValueError(
                     "The case is not currently paused for Manual Review. "
-                    f"Stage: {current_stage}; status: {current_status}."
+                    f"Stage: {current_stage}; status: {current_status}; db_status: {db_status}."
                 )
 
             return await graph.ainvoke(Command(resume=manual_input), config=config)
@@ -700,10 +987,7 @@ def _resume_human_review(
     case_id: str,
     human_input: dict[str, str],
 ) -> dict[str, Any]:
-    thread_id = _get_thread_id(
-        case_id,
-        create_if_missing=False,
-    )
+    thread_id = _recover_thread_id_for_case(case_id)
 
     if not thread_id:
         raise ValueError(
@@ -717,7 +1001,6 @@ def _resume_human_review(
         "[Human Review] case_id:",
         case_id,
     )
-
     print(
         "[Human Review] thread_id:",
         thread_id,
@@ -734,37 +1017,17 @@ def _resume_human_review(
             snapshot = await graph.aget_state(
                 config
             )
-
-            state_values = (
-                snapshot.values
-                if snapshot
-                else {}
-            )
+            state_values = snapshot.values if snapshot else {}
+            current_stage = state_values.get("current_stage")
+            current_status = _canonical_case_status(state_values.get("status"))
 
             print(
                 "[Human Review] state keys:",
                 sorted(state_values.keys()),
             )
-
-            print(
-                "[Human Review] stage:",
-                state_values.get(
-                    "current_stage"
-                ),
-            )
-
-            print(
-                "[Human Review] status:",
-                state_values.get(
-                    "status"
-                ),
-            )
-
-            print(
-                "[Human Review] "
-                "claim_data exists:",
-                "claim_data" in state_values,
-            )
+            print("[Human Review] stage:", current_stage)
+            print("[Human Review] status:", current_status)
+            print("[Human Review] claim_data exists:", "claim_data" in state_values)
 
             if not state_values:
                 raise ValueError(
@@ -781,34 +1044,34 @@ def _resume_human_review(
                     "thread persistence was enabled."
                 )
 
-            current_stage = state_values.get(
-                "current_stage"
-            )
-
-            current_status = state_values.get(
-                "status"
-            )
+            with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM public.claims WHERE case_id = %s",
+                        (case_id,),
+                    )
+                    row = cur.fetchone()
+            db_status = _canonical_case_status((row or {}).get("status")) if row else ""
+            print("[Human Review] database_status:", db_status)
 
             allowed_stages = {
                 "sla_complete",
                 "approval_requested",
                 "human_review",
-            }
-
-            allowed_statuses = {
                 "awaiting_human_review",
             }
+            allowed_statuses = {"awaiting_human_review", "routing_complete", "sla_complete"}
 
             if (
                 current_stage not in allowed_stages
-                and current_status
-                not in allowed_statuses
+                and current_status not in allowed_statuses
+                and db_status not in allowed_statuses
             ):
                 raise ValueError(
                     "The case is not currently "
                     "paused for Human Review. "
                     f"Stage: {current_stage}; "
-                    f"status: {current_status}."
+                    f"status: {current_status}; db_status: {db_status}."
                 )
 
             return await graph.ainvoke(
@@ -858,54 +1121,36 @@ if "workflow_result" not in st.session_state:
 if "selected_case" not in st.session_state:
     st.session_state.selected_case = None
 
-st.markdown(
-    """
-    <div style="
-        background: linear-gradient(135deg, rgba(37,99,235,0.12), rgba(14,165,233,0.06));
-        border: 1px solid rgba(37,99,235,0.14);
-        border-radius: 16px;
-        padding: 0.7rem 0.9rem;
-        margin: 0 0 0.7rem 0;
-        box-shadow: 0 10px 22px rgba(37,99,235,0.06);
-    ">
-        <div style="font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #2563eb; margin-bottom: 0.25rem;">
-            Claims Operations Console
-        </div>
-        <div style="font-size: 1.3rem; font-weight: 800; color: #0f172a; line-height: 1.15;">
-            Intelligent Claims Processing
-        </div>
-        <div style="margin-top: 0.18rem; color: #475569; font-size: 0.78rem; line-height: 1.3;">
-            AI-assisted claims processing with human-in-the-loop controls
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 _initialize_workflow_thread_table()
 if page == "Submit Claim":
-    st.header("Submit Claim")
+    render_page_header("Submit Claim", "Register claim details and supporting evidence.")
     with st.form("claim_form"):
-        case_id = st.text_input("Case ID", value=f"CASE-{uuid.uuid4().hex[:6].upper()}")
-        policy_number = st.text_input("Policy Number", value="POL-1001")
-        claimant_name = st.text_input("Claimant Name", value="Test Customer")
-        claim_type = st.selectbox("Claim Type", ["Medical", "Vehicle", "Property", "Other"])
-        claim_amount = st.number_input("Claim Amount", min_value=0.0, value=25000.0)
-        description = st.text_area("Description", value="Hospital treatment claim with medical bill.")
-        uploaded_files = st.file_uploader(
-            "Supporting Documents",
-            type=["pdf", "png", "jpg", "jpeg"],
-            accept_multiple_files=True,
-        )
+        left, right = st.columns([1, 1])
+        with left:
+            case_id = st.text_input("Case ID", value=f"CASE-{uuid.uuid4().hex[:6].upper()}")
+            policy_number = st.text_input("Policy Number", value="POL-1001")
+            claimant_name = st.text_input("Claimant Name", value="Test Customer")
+            claim_type = st.selectbox("Claim Type", ["Medical", "Vehicle", "Property", "Other"])
+        with right:
+            claim_amount = st.number_input("Claim Amount", min_value=0.0, value=25000.0)
+            description = st.text_area("Description", value="Hospital treatment claim with medical bill.")
+            uploaded_files = st.file_uploader(
+                "Supporting Documents",
+                type=["pdf", "png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+            )
         submitted = st.form_submit_button("Process Claim", type="primary")
 
     if submitted:
         if not case_id.strip():
             st.error("Case ID is required.")
         else:
+            processing_status = st.empty()
+            _render_processing_status(0)
             try:
                 _insert_case(case_id, policy_number, claimant_name, claim_type, float(claim_amount), description)
                 print("[UI] Claim registered:", case_id)
-                saved_documents = _persist_uploaded_documents(case_id, uploaded_files)
+                _persist_uploaded_documents(case_id, uploaded_files)
                 claim_data = {
                     "case_id": case_id,
                     "policy_number": policy_number,
@@ -922,27 +1167,70 @@ if page == "Submit Claim":
                 record_audit(case_id, "langgraph_supervisor", "workflow_started", {"thread_id": thread_id, "initial_stage": "submitted"}, stage="submitted")
                 st.session_state.workflow_result = result
                 st.session_state.selected_case = case_id
+                processing_status.empty()
                 st.success("Claim submitted and workflow started.")
+                _render_workflow_progress("submitted")
             except Exception as exc:
-                st.error(f"Unable to process claim: {exc}")
+                processing_status.empty()
+                st.error("Unable to continue workflow.")
+                with st.expander("Technical Details"):
+                    st.code(_safe_error_details(exc))
 
 elif page == "Case Queue":
-    st.header("Case Queue")
+    render_page_header("Case Queue", "Monitor active and completed claims.")
     cases = _queue_cases()
     if not cases:
         st.info("No cases available.")
     else:
-        queue_df = [{
-            "Case ID": row.get("case_id"),
-            "Claimant": row.get("claimant_name"),
-            "Claim Type": row.get("claim_type"),
-            "Amount": row.get("claim_amount"),
-            "Status": row.get("status"),
-        } for row in cases]
-        st.dataframe(queue_df, width="stretch")
+        search_term = st.text_input("Search cases", placeholder="Case ID, claimant, type, status", key="case_queue_search")
+        normalized = (search_term or "").strip().lower()
+        filtered_cases = cases
+        if normalized:
+            filtered_cases = [
+                row for row in cases
+                if any(
+                    normalized in str(value or "").lower()
+                    for value in [
+                        row.get("case_id"),
+                        row.get("claimant_name"),
+                        row.get("claim_type"),
+                        row.get("status"),
+                    ]
+                )
+            ]
+
+        page_size = 10
+        total_pages = max(1, (len(filtered_cases) + page_size - 1) // page_size) if filtered_cases else 1
+        page_number = st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key="case_queue_page",
+        )
+        start_index = (page_number - 1) * page_size
+        end_index = start_index + page_size
+        page_cases = filtered_cases[start_index:end_index]
+
+        if not page_cases:
+            st.info("No cases match the current search.")
+        else:
+            queue_rows = []
+            for row in page_cases:
+                queue_rows.append({
+                    "Case ID": row.get("case_id"),
+                    "Claimant": row.get("claimant_name"),
+                    "Type": row.get("claim_type"),
+                    "Amount": float(row.get("claim_amount") or 0.0),
+                    "Status": _status_display_label(row.get("status")),
+                    "Updated": row.get("created_at"),
+                })
+            st.dataframe(queue_rows, width="stretch", hide_index=True)
+            st.caption(f"Showing {len(page_cases)} of {len(filtered_cases)} matching cases • Page {page_number} of {total_pages}")
 
 elif page == "Case Workspace":
-    st.header("Case Workspace")
+    render_page_header("Case Workspace", "Review claim information, evidence and workflow progress.")
     cases = _queue_cases()
     case_options = [row["case_id"] for row in cases]
     selected_case = st.selectbox("Select Case", case_options, index=0 if case_options else None)
@@ -954,100 +1242,126 @@ elif page == "Case Workspace":
         if not case:
             st.info("Case not found.")
         else:
-            col1, col2, col3 = st.columns(3)
             canonical_status = _canonical_case_status(case.get("status"))
-            with col1:
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            with metric_col1:
                 st.metric("Case ID", case.get("case_id"))
-            with col2:
-                st.metric("Status", canonical_status)
-            with col3:
-                st.metric("Stage", canonical_status or "unknown")
+            with metric_col2:
+                st.metric("Status", _status_display_label(canonical_status))
+            with metric_col3:
+                st.metric("Claim Type", _display_value(case.get("claim_type")))
+            with metric_col4:
+                st.metric("Amount", _display_value(case.get("claim_amount")))
 
-            _render_workflow_status_bar(canonical_status, label="Case workflow")
+            _render_workflow_progress(canonical_status, label="Workflow Progress")
 
-            st.subheader("Claim Information")
-            st.write({
-                "Policy": case.get("policy_number"),
-                "Claimant": case.get("claimant_name"),
-                "Type": case.get("claim_type"),
-                "Amount": case.get("claim_amount"),
-                "Description": case.get("description"),
-            })
+            tabs = st.tabs(["Overview", "Documents", "AI Summary", "Timeline"])
+            with tabs[0]:
+                overview_col1, overview_col2 = st.columns(2)
+                with overview_col1:
+                    st.markdown("### Claim Details")
+                    st.markdown(f"- Policy: {_display_value(case.get('policy_number'))}")
+                    st.markdown(f"- Claimant: {_display_value(case.get('claimant_name'))}")
+                    st.markdown(f"- Claim Type: {_display_value(case.get('claim_type'))}")
+                    st.markdown(f"- Amount: {_display_value(case.get('claim_amount'))}")
+                    st.markdown(f"- SLA: {_display_value(case.get('updated_at'))}")
+                with overview_col2:
+                    st.markdown("### Processing")
+                    st.markdown(f"- Assigned handler: Team Lead")
+                    st.markdown(f"- Approver: Demo Approver")
+                    st.markdown(f"- Description: {_display_value(case.get('description'))}")
+
+            with tabs[1]:
+                if not documents:
+                    st.info("No documents attached.")
+                else:
+                    for document in documents:
+                        confidence = float(document.get("confidence") or 0.0)
+                        validation = "Passed" if confidence >= 0.75 else "Review"
+                        security = "No" if not document.get("injection_detected") else "Flagged"
+                        with st.container():
+                            st.markdown(
+                                f"**{document.get('file_name')}**  \n"
+                                f"Type: {document.get('document_type')}  \n"
+                                f"Confidence: {confidence:.2f}  \n"
+                                f"Validation: {validation}  \n"
+                                f"Security: {security}"
+                            )
+                            with st.expander("View Extracted Text"):
+                                st.write(document.get("extracted_text") or document.get("text") or "No extracted text available.")
+
+            with tabs[2]:
+                summary_payload = case.get("summary")
+                if not summary_payload:
+                    st.info("No AI summary available yet.")
+                else:
+                    if isinstance(summary_payload, dict):
+                        for section, content in summary_payload.items():
+                            st.markdown(f"### {section.replace('_', ' ').title()}")
+                            if isinstance(content, list):
+                                for item in content:
+                                    st.markdown(f"- {item}")
+                            else:
+                                st.write(content)
+                    else:
+                        st.write(summary_payload)
+
+            with tabs[3]:
+                with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT actor, action, details, created_at
+                            FROM public.claim_audit
+                            WHERE case_id = %s
+                            ORDER BY created_at DESC
+                            """,
+                            (selected_case,),
+                        )
+                        timeline_rows = cur.fetchall()
+                if not timeline_rows:
+                    st.info("No audit events recorded for this case yet.")
+                else:
+                    for row in timeline_rows:
+                        with st.expander(f"{row.get('created_at')} — {row.get('actor')} — {row.get('action')}"):
+                            details = row.get("details") or {}
+                            if isinstance(details, dict):
+                                detail_text = "; ".join(f"{key}: {value}" for key, value in details.items() if key != "_audit_key")
+                            else:
+                                detail_text = str(details)
+                            st.write(detail_text or "No additional detail")
 
             if canonical_status == "awaiting_documents":
                 requested_documents = _requested_documents_for_case(selected_case)
-                st.subheader("Additional Documents Required")
-                st.write(f"Case: {selected_case}")
-                st.write(f"Requested Documents: {', '.join(requested_documents)}")
-                if documents:
-                    st.write("Existing Documents:")
-                    for document in documents:
-                        st.write(f"- {document.get('file_name')} ({document.get('document_type')})")
+                st.markdown("<div class='panel-box'><strong>Additional Documents Required</strong></div>", unsafe_allow_html=True)
+                info_cols = st.columns(3)
+                with info_cols[0]:
+                    st.markdown(f"**Requested documents:** {', '.join(requested_documents)}")
+                with info_cols[1]:
+                    st.markdown("**Request reason:** Low confidence or missing supporting evidence")
+                with info_cols[2]:
+                    st.markdown("**Last notification:** Available in audit trail")
                 uploaded_document = st.file_uploader(
-                    "Upload Additional Document",
+                    "Upload Additional Documents",
                     type=["pdf", "png", "jpg", "jpeg"],
                     accept_multiple_files=False,
                     key=f"upload_additional_document_{selected_case}",
                 )
-                if st.button("Submit Documents & Resume Workflow", key=f"resume_case_documents_{selected_case}"):
+                if st.button("Upload & Resume Workflow", key=f"resume_case_documents_{selected_case}"):
                     if uploaded_document is None:
-                        st.warning("Upload a replacement or additional document before resuming the case.")
+                        st.warning("Upload a supporting document before resuming the case.")
                     else:
                         try:
                             result = _resume_existing_case_documents(selected_case, [uploaded_document])
                             st.session_state.workflow_result = result
                             st.success(f"Document uploaded and case {selected_case} resumed on the original workflow thread.")
-                            st.write(result.get("status") or "awaiting_documents")
                         except Exception as exc:
-                            st.error(f"Unable to resume existing case workflow: {exc}")
-
-            if documents:
-                st.subheader("Documents")
-                for document in documents:
-                    with st.expander(f"{document.get('file_name')} - {document.get('document_type')}"):
-                        st.write({
-                            "Document ID": document.get("document_id"),
-                            "Confidence": document.get("confidence"),
-                            "Injection Detected": document.get("injection_detected"),
-                        })
-            else:
-                st.info("No documents attached.")
-
-            if case.get("summary"):
-                st.subheader("Summary")
-                st.write(case.get("summary"))
-
-            st.subheader("Case Timeline")
-            with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, case_id, actor, action, details, created_at
-                        FROM public.claim_audit
-                        WHERE case_id = %s
-                        ORDER BY created_at ASC
-                        """,
-                        (selected_case,),
-                    )
-                    timeline_rows = cur.fetchall()
-            if not timeline_rows:
-                st.info("No audit events recorded for this case yet.")
-            else:
-                for row in timeline_rows:
-                    details = row.get("details") or {}
-                    safe_text = ""
-                    if isinstance(details, dict):
-                        safe_pairs = []
-                        for key, value in details.items():
-                            if key == "_audit_key":
-                                continue
-                            safe_pairs.append(f"{key}: {value}")
-                        safe_text = "; ".join(safe_pairs) if safe_pairs else "No additional detail"
-                    with st.expander(f"{row.get('created_at').strftime('%Y-%m-%d %H:%M:%S')} — {row.get('actor')} — {row.get('action')}"):
-                        st.write(safe_text)
+                            st.error("Unable to continue workflow.")
+                            with st.expander("Technical Details"):
+                                st.code(_safe_error_details(exc))
 
 elif page == "Manual Review":
-    st.header("Manual Review")
+    render_page_header("Manual Review", "Resolve document and validation exceptions.")
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1063,85 +1377,104 @@ elif page == "Manual Review":
     if not rows:
         st.info("No manual-review cases currently waiting.")
     else:
-        for row in rows:
-            case_id = row.get("case_id")
-            claimant_name = row.get("claimant_name")
-            claim_type = row.get("claim_type")
-            claim_amount = row.get("claim_amount")
-            status = row.get("status")
-            summary = row.get("summary")
-            description = row.get("description")
-            policy_number = row.get("policy_number")
-            documents = _list_documents(case_id)
-            confidence = max((float(doc.get("confidence") or 0.0) for doc in documents), default=0.0)
-            validation_issues = []
-            risks = []
-            security_flags = []
-            for doc in documents:
-                validation_issues.extend(doc.get("validation_issues") or [])
-                risks.extend(doc.get("risks") or [])
-                security_flags.extend(doc.get("security_flags") or [])
+        case_ids = [row.get("case_id") for row in rows]
+        selected_case = st.selectbox("Cases Requiring Manual Review", case_ids)
+        selected_row = next(row for row in rows if row.get("case_id") == selected_case)
+        case_id = selected_row.get("case_id")
+        claimant_name = selected_row.get("claimant_name")
+        claim_type = selected_row.get("claim_type")
+        claim_amount = float(selected_row.get("claim_amount") or 0.0)
+        summary = selected_row.get("summary")
+        description = selected_row.get("description")
+        policy_number = selected_row.get("policy_number")
+        documents = _list_documents(case_id)
+        confidence = max((float(doc.get("confidence") or 0.0) for doc in documents), default=0.0)
+        threshold = 0.75
+        validation_issues = []
+        risks = []
+        security_flags = []
+        for doc in documents:
+            validation_issues.extend(doc.get("validation_issues") or [])
+            risks.extend(doc.get("risks") or [])
+            security_flags.extend(doc.get("security_flags") or [])
 
-            with st.expander(f"{case_id} - {claimant_name}"):
-                st.write({
-                    "Case ID": case_id,
-                    "Policy Number": policy_number,
-                    "Claimant": claimant_name,
-                    "Claim Type": claim_type,
-                    "Claim Amount": claim_amount,
-                    "Status": status,
-                    "Description": description,
-                    "Document Confidence": confidence,
-                    "Validation Issues": validation_issues or "None",
-                    "Risks": risks or "None",
-                    "Security Flags": security_flags or "None",
-                    "Summary": summary,
-                })
+        metric_cols = st.columns(4)
+        with metric_cols[0]:
+            st.metric("Case ID", case_id)
+        with metric_cols[1]:
+            st.metric("Claimant", claimant_name)
+        with metric_cols[2]:
+            st.metric("Amount", _display_value(claim_amount))
+        with metric_cols[3]:
+            st.metric("Confidence", f"{confidence:.2f}")
 
-                if documents:
-                    st.subheader("Document details")
-                    for document in documents:
-                        with st.expander(f"{document.get('document_id')} - {document.get('file_name')}"):
-                            st.write({
-                                "Document ID": document.get("document_id"),
-                                "Type": document.get("document_type"),
-                                "File Name": document.get("file_name"),
-                                "Confidence": document.get("confidence"),
-                                "Injection Detected": document.get("injection_detected"),
-                                "Extracted Text": document.get("extracted_text") or document.get("text") or "",
-                            })
+        st.markdown("### Review Reason")
+        if confidence < threshold:
+            st.info("Low document confidence")
+        else:
+            st.info("Reviewing validation and security risk factors")
+        st.caption(f"Confidence: {confidence:.2f}")
+        st.caption(f"Threshold: {threshold:.2f}")
 
-                reviewer = st.text_input("Reviewer", value="Ops Reviewer", key=f"manual_review_reviewer_{case_id}")
-                action = st.selectbox(
-                    "Action",
-                    ["continue_processing", "reprocess_documents", "request_documents", "hold_case"],
-                    key=f"manual_review_action_{case_id}",
-                )
-                rationale = st.text_area("Rationale", key=f"manual_review_rationale_{case_id}")
+        risk_cols = st.columns(3)
+        with risk_cols[0]:
+            st.markdown("**Risks**")
+            if risks:
+                for item in risks:
+                    st.markdown(f"- {item}")
+            else:
+                st.write("None identified")
+        with risk_cols[1]:
+            st.markdown("**Validation Issues**")
+            if validation_issues:
+                for item in validation_issues:
+                    st.markdown(f"- {item}")
+            else:
+                st.write("None")
+        with risk_cols[2]:
+            st.markdown("**Security Flags**")
+            if security_flags:
+                for item in security_flags:
+                    st.markdown(f"- {item}")
+            else:
+                st.write("None")
 
-                if st.button("Submit Manual Review", key=f"submit_manual_review_{case_id}"):
-                    if not rationale.strip():
-                        st.error("Rationale is required for Manual Review.")
-                    else:
-                        try:
-                            result = _resume_manual_review(case_id, {
-                                "action": action,
-                                "reviewer": reviewer,
-                                "rationale": rationale,
-                                "missing_documents": ["supporting_document"] if action == "request_documents" else [],
-                            })
-                            record_audit(case_id, reviewer, "manual_review_resolved", {
-                                "action": action,
-                                "rationale": rationale,
-                            })
-                            st.session_state.workflow_result = result
-                            st.success("Manual review submitted.")
-                            st.write(result.get("status") or "Manual review response recorded.")
-                        except Exception as exc:
-                            st.error(f"Unable to resume manual review workflow: {exc}")
+        st.markdown("### Reviewer Decision")
+        reviewer = st.text_input("Reviewer", value="Ops Reviewer", key=f"manual_review_reviewer_{case_id}")
+        action = st.selectbox(
+            "Action",
+            ["continue_processing", "reprocess_documents", "request_documents", "hold_case"],
+            format_func=lambda value: {
+                "continue_processing": "Continue Processing",
+                "reprocess_documents": "Reprocess Documents",
+                "request_documents": "Request Documents",
+                "hold_case": "Hold Case",
+            }.get(value, value),
+            key=f"manual_review_action_{case_id}",
+        )
+        rationale = st.text_area("Rationale", key=f"manual_review_rationale_{case_id}")
+        st.caption("Manual Review resolves processing exceptions. It does not approve or reject a claim.")
+        if st.button("Submit Manual Review", key=f"submit_manual_review_{case_id}"):
+            if not rationale.strip():
+                st.error("Rationale is required for Manual Review.")
+            else:
+                try:
+                    result = _resume_manual_review(case_id, {
+                        "action": action,
+                        "reviewer": reviewer,
+                        "rationale": rationale,
+                        "missing_documents": ["supporting_document"] if action == "request_documents" else [],
+                    })
+                    record_audit(case_id, reviewer, "manual_review_resolved", {"action": action, "rationale": rationale})
+                    st.session_state.workflow_result = result
+                    st.success("Manual review submitted.")
+                except Exception as exc:
+                    st.error("Unable to continue workflow.")
+                    with st.expander("Technical Details"):
+                        st.code(_safe_error_details(exc))
 
 elif page == "Human Review":
-    st.header("Human Review")
+    render_page_header("Human Review", "Authorized final claim decision.")
     cases = _queue_cases()
     awaiting = [row for row in cases if row.get("status") in {"awaiting_human_review", "human_decision_received"}]
     if not awaiting:
@@ -1149,93 +1482,115 @@ elif page == "Human Review":
     else:
         chosen_case = st.selectbox("Case", [row["case_id"] for row in awaiting])
         case = _case_record(chosen_case)
-        documents = _list_documents(chosen_case)
         if not case:
             st.warning("Case not found.")
         else:
-            st.subheader(f"Case {chosen_case}")
-            _render_workflow_status_bar(case.get("status"), label="Human Review workflow")
-            st.write({
-                "Claimant": case.get("claimant_name"),
-                "Claim Type": case.get("claim_type"),
-                "Amount": case.get("claim_amount"),
-                "Status": case.get("status"),
-            })
+            metric_cols = st.columns(5)
+            with metric_cols[0]:
+                st.metric("Case ID", chosen_case)
+            with metric_cols[1]:
+                st.metric("Claim Type", _display_value(case.get("claim_type")))
+            with metric_cols[2]:
+                st.metric("Amount", _display_value(case.get("claim_amount")))
+            with metric_cols[3]:
+                st.metric("Policy", _display_value(case.get("policy_number")))
+            with metric_cols[4]:
+                st.metric("Routing", _status_display_label(case.get("status")))
+
+            _render_workflow_progress(case.get("status"), label="Workflow Progress")
             if case.get("summary"):
-                st.write("Summary")
-                st.write(case.get("summary"))
+                st.markdown("### AI Summary")
+                if isinstance(case.get("summary"), dict):
+                    for section, content in case["summary"].items():
+                        st.markdown(f"**{section.replace('_', ' ').title()}:**")
+                        if isinstance(content, list):
+                            for item in content:
+                                st.markdown(f"- {item}")
+                        else:
+                            st.write(content)
+                else:
+                    st.write(case.get("summary"))
 
             approver_directory = get_approver_directory()
             approver_names = [row.get("name") for row in approver_directory if row.get("active")]
             reviewer = st.selectbox("Reviewer", approver_names or ["Demo Approver", "Senior Approver", "Director Approver"])
             validation = validate_approver_limit(reviewer, float(case.get("claim_amount") or 0))
             if validation["valid"]:
-                st.success(f"{reviewer} is authorized for {float(case.get('claim_amount') or 0):,.2f}.")
+                st.success(f"✓ {reviewer} is authorized for {_display_value(float(case.get('claim_amount') or 0))}.")
             else:
-                st.error(f"{reviewer} cannot approve this claim amount. {validation.get('reason','')}")
+                st.error(f"✕ Reviewer approval limit is insufficient")
 
-            decision = st.selectbox("Decision", ["approved", "rejected", "request_more_information"], key="human_decision_selector")
+            decision = st.selectbox(
+                "Decision",
+                ["approved", "rejected", "request_more_information"],
+                format_func=lambda value: {
+                    "approved": "Approved",
+                    "rejected": "Rejected",
+                    "request_more_information": "Request More Information",
+                }.get(value, value),
+            )
             rationale = st.text_area("Decision Rationale", key="human_decision_rationale")
-            requested_documents = st.text_area(
-                "Requested Documents / Information",
-                help="List any supporting documents or clarifications required before the claim can be finalized.",
-                key="human_requested_documents",
-                placeholder="itemized_bill\ntreatment_proof\nclaimant_id",
-            ) if decision == "request_more_information" else ""
+            if decision == "request_more_information":
+                requested_documents = st.text_area(
+                    "Requested Information",
+                    placeholder="itemized_bill\ntreatment_proof\nclaimant_id",
+                    height=80,
+                )
+            else:
+                requested_documents = ""
 
-            if st.button("Submit Human Decision", type="primary", disabled=not validation["valid"]):
+            st.caption("Final claim decisions require an authorized human reviewer.")
+            submit_disabled = not validation["valid"]
+            if st.button("Submit Human Decision", type="primary", disabled=submit_disabled):
                 if not rationale.strip():
                     st.error("Please provide a rationale before continuing.")
                 elif decision == "request_more_information" and not requested_documents.strip():
                     st.error("Please list at least one requested document or clarification.")
                 else:
-                    payload = {
-                        "decision": decision,
-                        "rationale": rationale,
-                        "reviewer": reviewer,
-                    }
+                    payload = {"decision": decision, "rationale": rationale, "reviewer": reviewer}
                     if decision == "request_more_information":
-                        parsed_documents = [
-                            item.strip()
-                            for item in requested_documents.replace(";", "\n").splitlines()
-                            if item.strip()
-                        ]
-                        payload["missing_documents"] = parsed_documents
-                        payload["requested_documents"] = parsed_documents
+                        payload["missing_documents"] = [item.strip() for item in requested_documents.replace(";", "\n").splitlines() if item.strip()]
+                        payload["requested_documents"] = payload["missing_documents"]
                     try:
                         result = _resume_human_review(chosen_case, payload)
                         record_audit(chosen_case, reviewer, "human_decision_recorded", {"decision": decision, "rationale": rationale, "missing_documents": payload.get("missing_documents", [])})
                         st.session_state.workflow_result = result
                         if decision == "request_more_information":
                             st.info("Additional information requested. The claim remains open and is not finalized.")
-                            st.write(result.get("status") or "awaiting_documents")
                         else:
                             st.success("Human review submitted.")
-                            st.write(result.get("final_result", ""))
                     except Exception as exc:
-                        st.error(f"Unable to resume workflow: {exc}")
+                        st.error("Unable to continue workflow.")
+                        with st.expander("Technical Details"):
+                            st.code(_safe_error_details(exc))
 
 elif page == "Notifications":
-    st.header("Mailpit Notifications")
+    render_page_header("Notifications", "Latest operational notifications.")
     messages = get_mailpit_messages()
     if not messages:
         st.info("No Mailpit messages are currently queued.")
     else:
         for message in messages[:20]:
-            with st.expander(f"{message.get('Subject', 'Message')} - {message.get('From', 'unknown')}"):
-                st.write({
-                    "To": message.get("To"),
-                    "From": message.get("From"),
-                    "Subject": message.get("Subject"),
-                    "Text": message.get("Text"),
-                    "Created": message.get("Created"),
-                })
+            with st.expander(f"{message.get('Subject', 'Message')} · {message.get('To', 'unknown')}"):
+                st.markdown(f"- Subject: {message.get('Subject', 'Message')}")
+                st.markdown(f"- Recipient: {message.get('To', 'unknown')}")
+                st.markdown(f"- Created: {message.get('Created', 'unknown')}")
+                st.markdown(f"- Type: {message.get('Type', 'general')}")
+                st.write(message.get("Text", "No message content available."))
 
 elif page == "Audit":
-    st.header("Audit History")
-    case_filter = st.text_input("Filter by Case ID", key="audit_case_filter")
-    action_filter = st.selectbox("Filter by Action", ["All", "claim_registered", "workflow_started", "mcp_validation_completed", "intake_completed", "document_persisted", "document_validation_completed", "documents_requested", "workflow_paused_for_documents", "manual_review_started", "manual_review_resolved", "summary_created", "case_routed", "approval_requested", "sla_scheduled", "notification_sent", "human_review_started", "additional_information_requested", "human_decision_recorded", "claim_finalized"], index=0)
-    sort_order = st.radio("Sort order", ["Newest first", "Oldest first"], horizontal=True)
+    render_page_header("Audit Trail", "Trace automated and human actions across the case lifecycle.")
+    filters_col1, filters_col2, filters_col3 = st.columns([1.1, 1.2, 1])
+    with filters_col1:
+        case_filter = st.text_input("Case ID", key="audit_case_filter")
+    with filters_col2:
+        action_filter = st.selectbox(
+            "Action",
+            ["All", "claim_registered", "workflow_started", "mcp_validation_completed", "intake_completed", "document_persisted", "document_validation_completed", "documents_requested", "workflow_paused_for_documents", "manual_review_started", "manual_review_resolved", "summary_created", "case_routed", "approval_requested", "sla_scheduled", "notification_sent", "human_review_started", "additional_information_requested", "human_decision_recorded", "claim_finalized"],
+            index=0,
+        )
+    with filters_col3:
+        sort_order = st.radio("Sort Order", ["Newest first", "Oldest first"], horizontal=True)
 
     query = """
         SELECT
@@ -1252,7 +1607,7 @@ elif page == "Audit":
     if action_filter != "All":
         query += " AND action = %s "
         params.append(action_filter)
-    query += " ORDER BY created_at " + ("DESC" if sort_order == "Newest first" else "ASC") + " LIMIT 200"
+    query += " ORDER BY created_at " + ("DESC" if sort_order == "Newest first" else "ASC")
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -1267,14 +1622,14 @@ elif page == "Audit":
             safe_details = details or {}
             if isinstance(safe_details, dict):
                 safe_details = {k: v for k, v in safe_details.items() if k != "_audit_key"}
-            with st.expander(f"{case_id} - {action} - {created_at}"):
-                st.write({
-                    "Audit ID": audit_id,
-                    "Case ID": case_id,
-                    "Actor": actor,
-                    "Action": action,
-                    "Timestamp": created_at,
-                    "Details": safe_details,
-                })
+            with st.expander(f"{created_at} — {case_id} — {action}"):
+                st.markdown(f"- Actor: {actor}")
+                st.markdown(f"- Case: {case_id}")
+                st.markdown(f"- Action: {action}")
+                st.markdown(f"- Timestamp: {created_at}")
+                if safe_details:
+                    st.write(safe_details)
+                else:
+                    st.write("No additional detail")
 
 

@@ -279,19 +279,27 @@ def _transition_guard(state: ClaimState) -> tuple[str, str]:
     if human_decision:
         return "finalize", "Human decision received; finalization is required."
 
-    if missing_documents:
-        return "await_documents", "Missing required documents detected."
+    if current_stage in {"submitted", "mcp_validation_complete"}:
+        return "intake", "Intake processing must run before the claim can continue."
+
+    if current_stage == "intake_complete":
+        return "documents", "Documents are required before summary generation."
 
     if document_complete is False:
         return "await_documents", "Document processing is incomplete."
 
-    if validation.get("continue_allowed") is False:
+    if validation.get("continue_allowed") is False and current_stage not in {"submitted", "mcp_validation_complete", "intake_complete"}:
         return "manual_review", "Document validation blocked continuation."
 
-    if any(flag in risks for flag in {"low_confidence", "prompt_injection_detected", "amount_mismatch", "claimant_name_mismatch", "policy_inconsistency"}) or security_flags:
+    if (any(flag in risks for flag in {"low_confidence", "prompt_injection_detected", "amount_mismatch", "claimant_name_mismatch", "policy_inconsistency"}) or security_flags) and current_stage not in {"submitted", "mcp_validation_complete", "intake_complete"}:
         return "manual_review", "Security or validation risk requires manual review."
 
-    if current_stage in {"submitted", "mcp_validation_complete", "intake_complete", "documents_complete"}:
+    if missing_documents:
+        return "await_documents", "Missing required documents detected."
+
+    if current_stage in {"documents_complete", "documents_revalidated"}:
+        if missing_documents or document_complete is False or validation.get("continue_allowed") is False or _blocking_risks_for_state(state) or security_flags:
+            return "manual_review", "Unresolved validation risk prevents summary generation."
         return "summary", "Valid documents are ready for summary generation."
 
     if current_stage == "summary_complete":
@@ -443,6 +451,8 @@ def document_aggregation_node(state: ClaimState):
     minimum_confidence = min(confidence_values) if confidence_values else 0.0
     required_documents = _required_documents_for_claim_type(claim_type)
     present_types = {str(item.get("document_type") or "unknown").lower() for item in unique_results}
+    generic_document_types = {"unknown", "supporting_document", "receipt", "claim_form", "policy_document", "letter"}
+    all_workers_succeeded = bool(unique_results) and all(item.get("processing_complete") is True for item in unique_results)
     missing_required: list[str] = []
     for required in required_documents:
         matched = False
@@ -462,6 +472,9 @@ def document_aggregation_node(state: ClaimState):
             if required == "repair_invoice" and present == "repair_invoice":
                 matched = True
                 break
+            if present in generic_document_types and all_workers_succeeded:
+                matched = True
+                break
         if not matched:
             missing_required.append(required)
 
@@ -479,7 +492,6 @@ def document_aggregation_node(state: ClaimState):
         if item.get("processing_complete") is False:
             worker_failures = True
 
-    all_workers_succeeded = bool(unique_results) and all(item.get("processing_complete") is True for item in unique_results)
     overall_document_complete = bool(unique_results) and not missing_required and all_workers_succeeded
     threshold = float(claim_data.get("document_confidence_threshold") or claim_data.get("confidence_threshold") or 0.75)
     continue_allowed = (
@@ -615,6 +627,15 @@ def await_documents_node(state: ClaimState):
         }
     )
 
+    if resume is None or not isinstance(resume, dict) or not resume:
+        _persist_case_status(state["case_id"], "awaiting_documents", "awaiting_documents")
+        return {
+            "missing_documents": list(missing_documents),
+            "current_stage": "awaiting_documents",
+            "status": "awaiting_documents",
+            "interrupt_pending": True,
+        }
+
     if isinstance(resume, dict) and resume:
         claim_data = _normalise_document_data(state)
         if resume.get("document_text"):
@@ -626,8 +647,11 @@ def await_documents_node(state: ClaimState):
         if resume.get("document_id"):
             claim_data["document_id"] = resume["document_id"]
             claim_data["document_ids"] = [str(resume["document_id"])]
+        if not claim_data.get("document_type"):
+            claim_data["document_type"] = "supporting_document"
 
-        if claim_data.get("document_text", "").strip():
+        document_received = bool(resume.get("document_id")) or bool(claim_data.get("document_text", "").strip())
+        if document_received:
             record_audit(
                 state["case_id"],
                 "documents_mcp",
@@ -636,6 +660,7 @@ def await_documents_node(state: ClaimState):
                     "document_id": resume.get("document_id"),
                     "document_type": claim_data.get("document_type"),
                     "confidence": claim_data.get("document_confidence"),
+                    "text_present": bool(claim_data.get("document_text", "").strip()),
                 },
                 stage="documents_revalidated",
             )
@@ -786,6 +811,16 @@ def human_review_node(state: ClaimState):
         }
     )
     human_response = human_response or {}
+    if not human_response:
+        _persist_case_status(state["case_id"], "awaiting_human_review", "awaiting_human_review")
+        return {
+            "human_decision": "",
+            "human_rationale": "",
+            "human_reviewer": "",
+            "current_stage": "awaiting_human_review",
+            "status": "awaiting_human_review",
+            "interrupt_pending": True,
+        }
     decision = str(human_response.get("decision") or "unknown").strip()
     rationale = str(human_response.get("rationale") or "").strip()
     reviewer = str(human_response.get("reviewer") or "").strip()
@@ -832,13 +867,13 @@ def human_review_node(state: ClaimState):
             },
             stage="human_review_complete",
         )
-        _persist_case_status(state["case_id"], "human_decision_received", "human_review_complete")
+        _persist_case_status(state["case_id"], "human_review_complete", "human_review_complete")
         return {
             "human_decision": decision,
             "human_rationale": rationale,
             "human_reviewer": reviewer,
             "current_stage": "human_review_complete",
-            "status": "human_decision_received",
+            "status": "human_review_complete",
         }
 
     record_audit(
@@ -944,6 +979,19 @@ def supervisor_node(state: ClaimState):
     missing_documents = list(dict.fromkeys(missing_documents))
 
     human_decision = str(state.get("human_decision") or "").strip()
+    if state.get("interrupt_pending") is True:
+        reason = "Workflow is paused for external input or human review."
+        return Command(
+            goto=END,
+            update={
+                "next_step": "pause",
+                "supervisor_reason": reason,
+                "status": status or current_stage or "pending",
+                "current_stage": current_stage or status or "pending",
+                "interrupt_pending": True,
+            },
+        )
+
     if human_decision == "request_more_information":
         reason = "Additional information is required before the claim can be finalized."
         return Command(
@@ -1017,6 +1065,18 @@ def supervisor_node(state: ClaimState):
             },
         )
 
+    if status in {"awaiting_documents", "documents_incomplete"} or current_stage == "awaiting_documents":
+        reason = "Missing required documents detected."
+        return Command(
+            goto="await_documents",
+            update={
+                "next_step": "await_documents",
+                "supervisor_reason": reason,
+                "status": "awaiting_documents",
+                "current_stage": "awaiting_documents",
+            },
+        )
+
     failed_workers = [
         item for item in state.get("document_results") or [] if item.get("processing_complete") is False
     ]
@@ -1048,7 +1108,31 @@ def supervisor_node(state: ClaimState):
             },
         )
 
-    if validation.get("continue_allowed") is False:
+    if current_stage in {"submitted", "mcp_validation_complete"}:
+        reason = "Intake processing must run before the claim can continue."
+        return Command(
+            goto="intake",
+            update={
+                "next_step": "intake",
+                "supervisor_reason": reason,
+                "status": "intake_pending",
+                "current_stage": "mcp_validation_complete",
+            },
+        )
+
+    if current_stage == "intake_complete":
+        reason = "Documents are required before summary generation."
+        return Command(
+            goto="documents",
+            update={
+                "next_step": "documents",
+                "supervisor_reason": reason,
+                "status": "documents_processing",
+                "current_stage": "intake_complete",
+            },
+        )
+
+    if validation.get("continue_allowed") is False and current_stage not in {"submitted", "mcp_validation_complete", "intake_complete"}:
         reason = "Document validation blocked continuation."
         return Command(
             goto="manual_review",
@@ -1063,7 +1147,7 @@ def supervisor_node(state: ClaimState):
     risks = set(state.get("risks") or [])
     security_flags = set(state.get("security_flags") or [])
     blocking_risks = _blocking_risks_for_state(state)
-    if blocking_risks or security_flags:
+    if (blocking_risks or security_flags) and current_stage not in {"submitted", "mcp_validation_complete", "intake_complete"}:
         reason = "Security or validation risk requires manual review."
         return Command(
             goto="manual_review",
@@ -1072,6 +1156,18 @@ def supervisor_node(state: ClaimState):
                 "supervisor_reason": reason,
                 "status": "manual_review",
                 "current_stage": "manual_review",
+            },
+        )
+
+    if missing_documents:
+        reason = "Missing required documents detected."
+        return Command(
+            goto="await_documents",
+            update={
+                "next_step": "await_documents",
+                "supervisor_reason": reason,
+                "status": "awaiting_documents",
+                "current_stage": "awaiting_documents",
             },
         )
 
@@ -1334,6 +1430,14 @@ def manual_review_node(state: ClaimState):
         }
     )
     manual_response = manual_response or {}
+    if not manual_response:
+        _persist_case_status(case_id, "manual_review", "manual_review")
+        return {
+            "manual_review_reason": reason,
+            "status": "manual_review",
+            "current_stage": "manual_review",
+            "interrupt_pending": True,
+        }
     action = str(manual_response.get("action") or "hold_case").strip() or "hold_case"
     reviewer = str(manual_response.get("reviewer") or "unknown").strip() or "unknown"
     rationale = str(manual_response.get("rationale") or "").strip()
@@ -1440,6 +1544,7 @@ builder.add_node("finalize", finalize_node)
 builder.add_edge(START, "mcp_validation")
 builder.add_edge("mcp_validation", "supervisor")
 builder.add_edge("intake", "supervisor")
+builder.add_edge("documents", "supervisor")
 builder.add_edge("document_worker", "document_aggregation")
 builder.add_edge("document_aggregation", "supervisor")
 builder.add_edge("summary", "supervisor")
