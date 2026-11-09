@@ -672,7 +672,10 @@ def await_documents_node(state: ClaimState):
                     "document_id": claim_data.get("document_id"),
                     "document_ids": list(claim_data.get("document_ids") or []),
                     "missing_documents": [],
+                    "document_validation": {"missing_documents": [], "continue_allowed": False, "complete": False},
+                    "continue_allowed": False,
                     "document_complete": False,
+                    "processing_complete": False,
                     "current_stage": "documents_revalidated",
                     "status": "documents_revalidated",
                 },
@@ -1467,10 +1470,13 @@ def manual_review_node(state: ClaimState):
             "manual_review_reason": "",
             "manual_review_result": manual_response,
             "risks": remaining_risks,
+            "missing_documents": [],
+            "document_validation": {"missing_documents": [], "continue_allowed": False, "complete": False},
             "status": "documents_revalidated",
             "current_stage": "documents_revalidated",
-            "document_complete": True,
-            "continue_allowed": True,
+            "document_complete": False,
+            "continue_allowed": False,
+            "processing_complete": False,
         }
         _persist_case_status(case_id, "documents_revalidated", "documents_revalidated")
         record_audit(case_id, reviewer, "manual_review_resolved", {"action": action, "rationale": rationale, "resolved_risks": resolved_risks})

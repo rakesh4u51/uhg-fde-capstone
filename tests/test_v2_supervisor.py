@@ -182,6 +182,50 @@ def test_await_documents_resume_continues_when_uploaded_document_has_blank_text(
     assert result.update["current_stage"] == "documents_revalidated"
 
 
+def test_resume_paths_clear_stale_document_blockers(monkeypatch):
+    monkeypatch.setattr(
+        workflow,
+        "interrupt",
+        lambda payload: {"action": "continue_processing", "reviewer": "Demo Approver", "rationale": "Resolved", "resolved_risks": ["low_confidence"]},
+    )
+    manual_state = {
+        "case_id": "CASE-RESUME-MANUAL",
+        "current_stage": "manual_review",
+        "status": "manual_review",
+        "risks": ["low_confidence"],
+        "missing_documents": ["medical_bill"],
+        "document_complete": True,
+        "continue_allowed": True,
+        "document_validation": {"missing_documents": ["medical_bill"], "continue_allowed": True, "complete": True},
+        "security_flags": [],
+    }
+
+    manual_result = workflow.manual_review_node(manual_state)
+    assert isinstance(manual_result, Command)
+    assert manual_result.update["missing_documents"] == []
+    assert manual_result.update["document_validation"]["missing_documents"] == []
+    assert manual_result.update["document_complete"] is False
+    assert manual_result.update["continue_allowed"] is False
+
+    monkeypatch.setattr(workflow, "interrupt", lambda payload: {"document_id": "DOC-RESUME", "document_text": "Hospital bill total 25000", "document_type": "medical_bill", "document_confidence": 0.98})
+    await_state = {
+        "case_id": "CASE-RESUME-AWAIT",
+        "claim_data": {"claim_type": "Medical", "claim_amount": 25000.0},
+        "current_stage": "awaiting_documents",
+        "status": "awaiting_documents",
+        "missing_documents": ["medical_bill"],
+        "document_complete": False,
+        "continue_allowed": False,
+        "document_validation": {"missing_documents": ["medical_bill"], "continue_allowed": False, "complete": False},
+    }
+
+    await_result = workflow.await_documents_node(await_state)
+    assert isinstance(await_result, Command)
+    assert await_result.update["missing_documents"] == []
+    assert await_result.update["document_validation"]["missing_documents"] == []
+    assert await_result.update["continue_allowed"] is False
+
+
 def test_await_documents_node_persists_status_before_interrupt(monkeypatch):
     calls = []
     monkeypatch.setattr(workflow, "interrupt", lambda payload: {"document_id": "DOC-NEW", "document_text": "Claimant Name: Demo Customer\nPolicy Number: POL-1001\nAmount: 25000\nService Date: 2026-10-20", "document_type": "medical_bill", "document_confidence": 0.98})
